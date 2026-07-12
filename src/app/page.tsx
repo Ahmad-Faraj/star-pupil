@@ -83,12 +83,11 @@ export default function Home() {
 
     try {
       const replyRes = await replyPromise;
-      if (replyRes.ok) {
-        const reply = (await replyRes.json()) as PupilReply;
-        setTranscript((t) => [...t, { role: "pupil", text: reply.reply }]);
-      }
+      if (!replyRes.ok) throw new Error(String(replyRes.status));
+      const reply = (await replyRes.json()) as PupilReply;
+      setTranscript((t) => [...t, { role: "pupil", text: reply.reply }]);
     } catch {
-      setError("Pip lost the thread. Say it again?");
+      setError("Pip lost the thread. Your sentence is still in the notebook. Say the next one.");
     } finally {
       setPipThinking(false);
     }
@@ -247,6 +246,13 @@ export default function Home() {
                   <div className="self-start rounded-md bg-secondary px-3 py-2 text-sm text-muted-foreground">
                     <span className="animate-pulse">Pip is thinking…</span>
                   </div>
+                )}
+                {ledger.length === 0 && !pipThinking && (
+                  <p className="mt-auto border-t pt-3 text-sm text-muted-foreground">
+                    Teach three or four things, then send Pip to the exam. If you want to see what
+                    this really does, slip one sloppy sentence in on purpose. Pip will believe it,
+                    and the report card will quote it back to you.
+                  </p>
                 )}
               </div>
               {error && <p className="mt-2 text-sm text-destructive">{error}</p>}

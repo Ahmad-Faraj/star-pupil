@@ -68,5 +68,8 @@ export async function generateJson<T>(
       await new Promise((r) => setTimeout(r, 1500 * 2 ** (attempt - 1)));
     }
   }
-  throw new Error(`All models throttled or failing (${lastError})`);
+  console.error("llm: every model failed —", lastError);
+  throw new Error(
+    "The free Gemini tier is out of quota right now. Wait a minute and try again."
+  );
 }
