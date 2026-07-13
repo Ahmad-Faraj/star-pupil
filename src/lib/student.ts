@@ -16,6 +16,7 @@ export interface Belief {
   quote: string; // the teacher's exact words that produced this belief
   turn: number; // which teacher message it came from
   note: string; // why it got this status (for wrong: the licensed overgeneralization)
+  derivedFrom: number[]; // ids of earlier beliefs this one was reasoned from, if any
 }
 
 export interface ChatTurn {
@@ -48,6 +49,7 @@ const EXTRACT_SCHEMA = {
           status: { type: "string", enum: ["correct", "wrong", "fuzzy"] },
           quote: { type: "string" },
           note: { type: "string" },
+          derivedFrom: { type: "array", items: { type: "number" } },
         },
         required: ["op", "concept", "statement", "status", "quote", "note"],
       },
@@ -85,6 +87,12 @@ Rules:
    belief (a correction should flip wrong->correct and keep the new quote).
 6. Do not invent beliefs the words don't support. 0 ops is a valid answer for
    small talk.
+7. "derivedFrom": if this belief is Pip REASONING FORWARD from an earlier
+   belief rather than a fresh fact (e.g. the teacher draws a conclusion that
+   only follows because of what was said before), list the id(s) of the
+   earlier belief(s) it was reasoned from. A wrong earlier belief that a later
+   correct-sounding statement quietly depends on is exactly the case this
+   exists to catch. Leave empty for a standalone fact.
 
 CURRENT LEDGER:
 ${existing || "(empty)"}
@@ -94,7 +102,7 @@ TEACHER'S LATEST MESSAGE (turn ${turn}):
 ${teacherMessage}
 ---
 
-Return JSON: {"ops": [{"op", "id", "concept", "statement", "status", "quote", "note"}]}`;
+Return JSON: {"ops": [{"op", "id", "concept", "statement", "status", "quote", "note", "derivedFrom"}]}`;
 
   const { ops } = await generateJson<{
     ops: {
@@ -105,12 +113,15 @@ Return JSON: {"ops": [{"op", "id", "concept", "statement", "status", "quote", "n
       status: BeliefStatus;
       quote: string;
       note: string;
+      derivedFrom?: number[];
     }[];
   }>(prompt, { temperature: 0.3, tier: "smart", responseSchema: EXTRACT_SCHEMA });
 
   const next = ledger.map((b) => ({ ...b }));
   let nextId = ledger.reduce((m, b) => Math.max(m, b.id), 0) + 1;
   for (const op of ops ?? []) {
+    const validIds = new Set(next.map((b) => b.id));
+    const derivedFrom = (op.derivedFrom ?? []).filter((id) => validIds.has(id));
     if (op.op === "update" && op.id !== undefined) {
       const target = next.find((b) => b.id === op.id);
       if (target) {
@@ -121,21 +132,46 @@ Return JSON: {"ops": [{"op", "id", "concept", "statement", "status", "quote", "n
           quote: op.quote,
           turn,
           note: op.note,
+          derivedFrom: derivedFrom.filter((id) => id !== target.id),
         });
         continue;
       }
     }
     next.push({
-      id: nextId++,
+      id: nextId,
       concept: op.concept,
       statement: op.statement,
       status: op.status,
       quote: op.quote,
       turn,
       note: op.note,
+      derivedFrom: derivedFrom.filter((id) => id !== nextId),
     });
+    nextId++;
   }
   return next;
+}
+
+// Walks derivedFrom links back from a belief to the earliest non-correct
+// ancestor — the actual root cause when a wrong belief quietly poisoned a
+// later, correct-sounding conclusion. Cycle-safe; falls back to the belief
+// itself when it has no wrong ancestry.
+export function rootCause(ledger: Belief[], id: number): Belief | undefined {
+  const byId = new Map(ledger.map((b) => [b.id, b]));
+  let current = byId.get(id);
+  if (!current) return undefined;
+  const seen = new Set<number>([id]);
+  let root = current;
+  while (current) {
+    const parent: Belief | undefined = current.derivedFrom
+      .map((pid) => byId.get(pid))
+      .find((p): p is Belief => !!p && p.status !== "correct" && !seen.has(p.id));
+    if (!parent) break;
+    seen.add(parent.id);
+    root = parent;
+    current = parent;
+  }
+  return root;
 }
 
 // ---------------------------------------------------------------------------
@@ -190,6 +226,43 @@ Return JSON: {"reply", "mood"} (mood: curious | confused | lightbulb | worried)`
 
   return generateJson<PupilReply>(prompt, {
     temperature: 0.9,
+    tier: "fast",
+    responseSchema: REPLY_SCHEMA,
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Check-in: mid-lesson, the teacher can ask Pip to explain a concept back
+// before the exam does. Same ledger-only constraint as the exam, but no
+// grading — this is a formative mirror, not a mark. It reuses the reply
+// schema/mood since it is still Pip talking, just prompted to explain rather
+// than react.
+
+export async function explainConcept(
+  topic: string,
+  ledger: Belief[],
+  concept: string
+): Promise<PupilReply> {
+  const related = ledger.filter((b) => b.concept === concept);
+  const beliefs = related.map((b) => `- ${b.statement}`).join("\n");
+
+  const prompt = `You are Pip, a student learning "${topic}". Your teacher just asked you to
+explain "${concept}" back in your own words, before any exam. Use ONLY the
+beliefs below — do not reach for outside knowledge of ${topic}, even if it
+would make the answer more correct.
+
+WHAT YOU BELIEVE ABOUT "${concept}":
+${beliefs || "(nothing — you were never taught this)"}
+
+If the list is empty, say plainly you were never taught it, do not guess.
+Otherwise explain it back like a student checking their own understanding out
+loud — confident where your beliefs are confident, hedging where they are
+fuzzy. 1-3 sentences.
+
+Return JSON: {"reply", "mood"} (mood: curious | confused | lightbulb | worried)`;
+
+  return generateJson<PupilReply>(prompt, {
+    temperature: 0.7,
     tier: "fast",
     responseSchema: REPLY_SCHEMA,
   });
