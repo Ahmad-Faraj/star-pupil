@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Mic, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -96,7 +96,16 @@ export default function Home() {
   const [showCheckin, setShowCheckin] = useState(false);
   const [checkinConcept, setCheckinConcept] = useState("");
   const [checkinBusy, setCheckinBusy] = useState(false);
+  const [paperPending, setPaperPending] = useState(false);
+  const [selectedBelief, setSelectedBelief] = useState<number | null>(null);
+  const [flashTurn, setFlashTurn] = useState<number | null>(null);
   const turnRef = useRef(0);
+  const chatRef = useRef<HTMLDivElement>(null);
+  // Whether the reader is parked at the bottom of the chat. New messages only
+  // pull the scroll down when this is true, so scrolling up to reread an old
+  // quote doesn't get yanked away by Pip's next reply.
+  const stickRef = useRef(true);
+  const paperTopicRef = useRef("");
   // Extraction is the slow call and Pip's reply is the fast one, so the teacher
   // can send the next sentence while the notebook is still being written. Both
   // guards below exist for that: the ref carries the newest ledger (state would
@@ -106,20 +115,44 @@ export default function Home() {
   const extractions = useRef<Promise<void>>(Promise.resolve());
   const speech = useSpeechInput((text) => setDraft((d) => (d ? `${d} ${text}` : text)));
 
+  useEffect(() => {
+    const el = chatRef.current;
+    if (el && stickRef.current) el.scrollTop = el.scrollHeight;
+  }, [transcript, pipThinking]);
+
   function writeLedger(next: Belief[]) {
     ledgerRef.current = next;
     setLedger(next);
   }
 
   function enroll(t: string) {
-    setTopic(t.trim());
+    const subject = t.trim();
+    setTopic(subject);
     setPhase("lesson");
     setTranscript([
       {
         role: "pupil",
-        text: `Okay. I know nothing about ${t.trim()}, and I mean nothing. Teach me.`,
+        text: `Okay. I know nothing about ${subject}, and I mean nothing. Teach me.`,
       },
     ]);
+    // The paper is written now, before any teaching, so it cannot be fitted to
+    // the lesson. If this call fails the exam route writes one at exam time
+    // instead — the lesson screen just never claims the seal.
+    paperTopicRef.current = subject;
+    setPaperPending(true);
+    fetch("/api/paper", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic: subject }),
+    })
+      .then((res) => res.json().then((body) => ({ ok: res.ok, body })))
+      .then(({ ok, body }) => {
+        if (ok && body.questions?.length && paperTopicRef.current === subject) {
+          setPaper(body.questions as ExamQuestion[]);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setPaperPending(false));
   }
 
   function loadSeedDemo() {
@@ -127,6 +160,7 @@ export default function Home() {
     setTranscript(SEED_TRANSCRIPT);
     writeLedger(SEED_LEDGER);
     turnRef.current = 4;
+    paperTopicRef.current = SEED_TOPIC;
     setPaper(SEED_EXAM);
     setResult({ questions: SEED_EXAM, answers: SEED_ANSWERS, grades: SEED_GRADES });
     setPrevReport(null);
@@ -138,6 +172,7 @@ export default function Home() {
   async function teach() {
     const message = draft.trim();
     if (!message || pipThinking) return;
+    stickRef.current = true;
     setDraft("");
     setError(null);
     const turn = ++turnRef.current;
@@ -264,6 +299,23 @@ export default function Home() {
     }
   }
 
+  // A node and the sentence that created it are the same thing seen from two
+  // sides. Selecting from either side highlights both: the map dims to the
+  // belief's chain and the chat scrolls to the teacher's own words.
+  function focusBelief(id: number | null) {
+    setSelectedBelief(id);
+    if (id == null) return;
+    const belief = ledgerRef.current.find((b) => b.id === id);
+    if (!belief) return;
+    setTab("map");
+    stickRef.current = false;
+    chatRef.current
+      ?.querySelector(`[data-turn="${belief.turn}"]`)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setFlashTurn(belief.turn);
+    window.setTimeout(() => setFlashTurn(null), 1400);
+  }
+
   function teachTheGaps() {
     if (result) setPrevReport(result.grades);
     setResult(null);
@@ -284,7 +336,10 @@ export default function Home() {
     setPrevReport(null);
     setError(null);
     setMood("curious");
+    setSelectedBelief(null);
+    setPaperPending(false);
     turnRef.current = 0;
+    paperTopicRef.current = "";
   }
 
   function downloadCard() {
@@ -309,6 +364,14 @@ export default function Home() {
   const pct = result?.questions.length ? score / result.questions.length : 0;
   const stats = result ? coverageStats(result.answers, result.grades) : null;
   const concepts = Array.from(new Map(ledger.map((b) => [b.concept, b])).values());
+  const beliefsByTurn = new Map<number, Belief[]>();
+  for (const b of ledger) {
+    const list = beliefsByTurn.get(b.turn) ?? [];
+    list.push(b);
+    beliefsByTurn.set(b.turn, list);
+  }
+  let teacherCount = 0;
+  const turnOfIndex = transcript.map((t) => (t.role === "teacher" ? ++teacherCount : 0));
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -333,7 +396,9 @@ export default function Home() {
               Pip knows nothing. You explain, and every sentence you say becomes
               a belief on Pip&apos;s live belief map — including the sloppy ones. Then
               Pip sits an exam alone, answering only from what you taught. The
-              grade on the report card is yours.
+              paper is written the moment you enroll, before your first sentence,
+              so it cannot be bent around your lesson. The grade on the report
+              card is yours.
             </p>
             <div className="mt-8 flex gap-2">
               <Input
@@ -371,26 +436,66 @@ export default function Home() {
                   Teaching Pip: {topic}
                 </h2>
               </div>
-              <div className="mt-4 flex min-h-[420px] flex-col gap-3 rounded-md border bg-card p-4">
-                {transcript.map((t, i) => (
-                  <div
-                    key={i}
-                    className={`max-w-[85%] rounded-md px-3 py-2 text-[15px] leading-6 ${
-                      t.role === "teacher"
-                        ? "self-end bg-primary text-primary-foreground"
-                        : t.checkin
-                          ? "self-start border border-dashed bg-secondary/60"
-                          : "self-start bg-secondary"
-                    }`}
-                  >
-                    {t.role === "pupil" && (
-                      <span className="mr-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        {t.checkin ? "Pip · checking understanding" : "Pip"}
-                      </span>
-                    )}
-                    {t.text}
-                  </div>
-                ))}
+              <div
+                ref={chatRef}
+                onScroll={() => {
+                  const el = chatRef.current;
+                  if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+                }}
+                className="mt-4 flex h-[420px] flex-col gap-3 overflow-y-auto rounded-md border bg-card p-4"
+              >
+                {transcript.map((t, i) => {
+                  const turn = turnOfIndex[i];
+                  const noted = t.role === "teacher" ? (beliefsByTurn.get(turn) ?? []) : [];
+                  return (
+                    <div
+                      key={i}
+                      data-turn={t.role === "teacher" ? turn : undefined}
+                      className={`max-w-[85%] rounded-md px-3 py-2 text-[15px] leading-6 transition-shadow ${
+                        t.role === "teacher"
+                          ? "self-end bg-primary text-primary-foreground"
+                          : t.checkin
+                            ? "self-start border border-dashed bg-secondary/60"
+                            : "self-start bg-secondary"
+                      } ${
+                        t.role === "teacher" && flashTurn === turn
+                          ? "ring-2 ring-[oklch(0.75_0.12_85)] ring-offset-2"
+                          : ""
+                      }`}
+                    >
+                      {t.role === "pupil" && (
+                        <span className="mr-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                          {t.checkin ? "Pip · checking understanding" : "Pip"}
+                        </span>
+                      )}
+                      {t.text}
+                      {noted.length > 0 && (
+                        <span className="mt-1.5 flex items-center gap-1.5 border-t border-primary-foreground/15 pt-1.5">
+                          <span className="text-[10px] uppercase tracking-wide text-primary-foreground/60">
+                            in the notebook
+                          </span>
+                          {noted.map((b) => (
+                            <button
+                              key={b.id}
+                              title={`${b.concept} (${b.status})`}
+                              aria-label={`${b.concept} (${b.status})`}
+                              onClick={() => focusBelief(b.id)}
+                              className="h-2.5 w-2.5 rounded-full transition-transform hover:scale-125"
+                              style={{
+                                background:
+                                  b.status === "correct"
+                                    ? "oklch(0.8 0.13 85)"
+                                    : b.status === "wrong"
+                                      ? "oklch(0.62 0.19 27)"
+                                      : "oklch(0.75 0.015 80)",
+                              }}
+                            />
+                          ))}
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
                 {pipThinking && (
                   <div className="self-start rounded-md bg-secondary px-3 py-2 text-sm text-muted-foreground">
                     <span className="animate-pulse">Pip is thinking…</span>
@@ -490,7 +595,7 @@ export default function Home() {
               </div>
               <div className="mt-2 min-h-[300px] rounded-md border bg-card p-4">
                 {tab === "map" ? (
-                  <BeliefGraph beliefs={ledger} />
+                  <BeliefGraph beliefs={ledger} selected={selectedBelief} onSelect={focusBelief} />
                 ) : (
                   <>
                     {ledger.length === 0 && writingNotes === 0 && (
@@ -512,10 +617,60 @@ export default function Home() {
                   </>
                 )}
               </div>
+              <div className="mt-4 rounded-md border bg-card p-4">
+                <div className="flex items-baseline justify-between">
+                  <h4 className="text-sm font-semibold tracking-tight">The exam paper</h4>
+                  <span className="text-xs text-muted-foreground">
+                    {paperPending ? "being written…" : paper ? "sealed" : "written at exam time"}
+                  </span>
+                </div>
+                {paperPending && (
+                  <p className="mt-2 animate-pulse text-sm text-muted-foreground">
+                    The examiner next door is writing the paper — from the subject, not from your
+                    lesson.
+                  </p>
+                )}
+                {!paperPending && paper && (
+                  <>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      {prevReport
+                        ? "Same paper as last time. The retake grades the teaching, not new questions."
+                        : `${paper.length} questions, written the moment you enrolled. Two are face up so you can see the paper is real. Pip sits exactly these.`}
+                    </p>
+                    <ol className="mt-3 space-y-2">
+                      {paper.map((q, i) =>
+                        i < 2 || prevReport ? (
+                          <li key={i} className="flex gap-2 text-sm leading-5">
+                            <span className="w-6 shrink-0 pt-px text-xs tabular-nums text-muted-foreground">
+                              Q{i + 1}
+                            </span>
+                            <span>{q.q}</span>
+                          </li>
+                        ) : (
+                          <li key={i} className="flex items-center gap-2">
+                            <span className="w-6 shrink-0 text-xs tabular-nums text-muted-foreground">
+                              Q{i + 1}
+                            </span>
+                            <span
+                              className="h-3.5 rounded-[2px] bg-foreground/80"
+                              style={{ width: `${58 + ((i * 17) % 30)}%` }}
+                            />
+                          </li>
+                        )
+                      )}
+                    </ol>
+                  </>
+                )}
+                {!paperPending && !paper && (
+                  <p className="mt-2 text-sm text-muted-foreground">
+                    The examiner will write it when Pip walks in.
+                  </p>
+                )}
+              </div>
               <Button
                 className="mt-4 w-full"
                 size="lg"
-                disabled={ledger.length < 3 || writingNotes > 0}
+                disabled={ledger.length < 3 || writingNotes > 0 || paperPending}
                 onClick={sendToExam}
               >
                 Send Pip to the exam
@@ -538,7 +693,7 @@ export default function Home() {
             <p className="mt-2 text-muted-foreground">You wait outside. No helping now.</p>
             <div className="mx-auto mt-8 max-w-sm space-y-2 text-left font-mono text-sm">
               <StageLine done={examStage !== "writing"} active={examStage === "writing"}>
-                the examiner writes the paper
+                {paper ? "the sealed paper is opened" : "the examiner writes the paper"}
               </StageLine>
               <StageLine done={examStage === "grading"} active={examStage === "sitting"}>
                 Pip answers from the notebook alone
