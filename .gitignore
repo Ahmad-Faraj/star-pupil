@@ -43,3 +43,6 @@ next-env.d.ts
 # local scratch
 AGENTS.md
 CLAUDE.md
+
+.vercel
+.env*

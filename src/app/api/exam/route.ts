@@ -1,12 +1,15 @@
 import { NextRequest } from "next/server";
-import { Belief, generateExam, gradeExam, sitExam } from "@/lib/student";
+import { Belief, ExamQuestion, generateExam, gradeExam, sitExam } from "@/lib/student";
 
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
-  const { topic, ledger } = (await req.json()) as {
+  // A retake sends the paper back. Pip must sit the SAME questions or the two
+  // grades cannot be compared, and comparing them is the point of a retake.
+  const { topic, ledger, paper } = (await req.json()) as {
     topic?: string;
     ledger?: Belief[];
+    paper?: ExamQuestion[];
   };
   if (!topic || !ledger?.length) {
     return Response.json(
@@ -22,7 +25,7 @@ export async function POST(req: NextRequest) {
         controller.enqueue(encoder.encode(JSON.stringify(obj) + "\n"));
       try {
         send({ kind: "stage", stage: "writing" });
-        const questions = await generateExam(topic, ledger, 6);
+        const questions = paper?.length ? paper : await generateExam(topic, ledger, 6);
         send({ kind: "stage", stage: "sitting" });
         const answers = await sitExam(topic, ledger, questions);
         send({ kind: "stage", stage: "grading" });

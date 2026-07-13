@@ -1,6 +1,7 @@
 "use client";
 
 import { useRef, useState } from "react";
+import { Mic, Square } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -12,9 +13,27 @@ import {
   ExamQuestion,
   GradedAnswer,
   PupilReply,
+  rootCause,
 } from "@/lib/student";
+import { BeliefGraph } from "@/components/belief-graph";
+import { Mood, PipFace } from "@/components/pip-face";
+import { useSpeechInput } from "@/lib/use-speech-input";
+import { downloadReportCard } from "@/lib/report-card-image";
+import {
+  SEED_ANSWERS,
+  SEED_EXAM,
+  SEED_GRADES,
+  SEED_LEDGER,
+  SEED_TOPIC,
+  SEED_TRANSCRIPT,
+} from "@/lib/seed-demo";
 
 type Phase = "enroll" | "lesson" | "exam" | "report";
+type Tab = "map" | "log";
+
+interface DisplayTurn extends ChatTurn {
+  checkin?: boolean;
+}
 
 interface ExamResult {
   questions: ExamQuestion[];
@@ -23,6 +42,13 @@ interface ExamResult {
 }
 
 const SUGGESTED = ["photosynthesis", "binary search", "the French Revolution", "supply and demand"];
+
+function scoreOf(grades: GradedAnswer[]): number {
+  return grades.reduce(
+    (s, g) => s + (g.verdict === "correct" ? 1 : g.verdict === "partial" ? 0.5 : 0),
+    0
+  );
+}
 
 function gradeLetter(score: number, total: number): string {
   const pct = total === 0 ? 0 : score / total;
@@ -34,18 +60,56 @@ function gradeLetter(score: number, total: number): string {
   return "F";
 }
 
+// Coverage asks "how much of the subject did you actually teach"; accuracy
+// asks "of what you taught, how much was right." A confessed gap counts
+// against coverage but not accuracy — Pip refusing to guess is honest, not
+// wrong.
+function coverageStats(answers: ExamAnswer[], grades: GradedAnswer[]) {
+  const total = grades.length;
+  const covered = answers.filter((a) => !a.confessed).length;
+  const coveredScore = grades.reduce(
+    (s, g, i) =>
+      !answers[i]?.confessed ? s + (g.verdict === "correct" ? 1 : g.verdict === "partial" ? 0.5 : 0) : s,
+    0
+  );
+  return {
+    coveragePct: total ? covered / total : 0,
+    accuracyPct: covered ? coveredScore / covered : 0,
+  };
+}
+
 export default function Home() {
   const [phase, setPhase] = useState<Phase>("enroll");
   const [topic, setTopic] = useState("");
-  const [transcript, setTranscript] = useState<ChatTurn[]>([]);
+  const [transcript, setTranscript] = useState<DisplayTurn[]>([]);
   const [ledger, setLedger] = useState<Belief[]>([]);
   const [draft, setDraft] = useState("");
   const [pipThinking, setPipThinking] = useState(false);
   const [writingNotes, setWritingNotes] = useState(0); // pending extractions
   const [examStage, setExamStage] = useState<string>("");
   const [result, setResult] = useState<ExamResult | null>(null);
+  const [paper, setPaper] = useState<ExamQuestion[] | null>(null);
+  const [prevReport, setPrevReport] = useState<GradedAnswer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("map");
+  const [mood, setMood] = useState<Mood>("curious");
+  const [showCheckin, setShowCheckin] = useState(false);
+  const [checkinConcept, setCheckinConcept] = useState("");
+  const [checkinBusy, setCheckinBusy] = useState(false);
   const turnRef = useRef(0);
+  // Extraction is the slow call and Pip's reply is the fast one, so the teacher
+  // can send the next sentence while the notebook is still being written. Both
+  // guards below exist for that: the ref carries the newest ledger (state would
+  // still be the one from render), and the queue keeps extractions in turn
+  // order so a late reply cannot overwrite the beliefs an earlier one wrote.
+  const ledgerRef = useRef<Belief[]>([]);
+  const extractions = useRef<Promise<void>>(Promise.resolve());
+  const speech = useSpeechInput((text) => setDraft((d) => (d ? `${d} ${text}` : text)));
+
+  function writeLedger(next: Belief[]) {
+    ledgerRef.current = next;
+    setLedger(next);
+  }
 
   function enroll(t: string) {
     setTopic(t.trim());
@@ -58,50 +122,105 @@ export default function Home() {
     ]);
   }
 
+  function loadSeedDemo() {
+    setTopic(SEED_TOPIC);
+    setTranscript(SEED_TRANSCRIPT);
+    writeLedger(SEED_LEDGER);
+    turnRef.current = 4;
+    setPaper(SEED_EXAM);
+    setResult({ questions: SEED_EXAM, answers: SEED_ANSWERS, grades: SEED_GRADES });
+    setPrevReport(null);
+    setError(null);
+    setMood("curious");
+    setPhase("report");
+  }
+
   async function teach() {
     const message = draft.trim();
     if (!message || pipThinking) return;
     setDraft("");
     setError(null);
     const turn = ++turnRef.current;
-    const nextTranscript: ChatTurn[] = [...transcript, { role: "teacher" as const, text: message }];
+    const nextTranscript: DisplayTurn[] = [...transcript, { role: "teacher" as const, text: message }];
     setTranscript(nextTranscript);
     setPipThinking(true);
     setWritingNotes((n) => n + 1);
 
-    // Pip answers fast; the notebook updates when the slower extraction lands.
     const replyPromise = fetch("/api/reply", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, ledger, transcript: nextTranscript, message }),
+      body: JSON.stringify({
+        topic,
+        ledger: ledgerRef.current,
+        transcript: nextTranscript,
+        message,
+      }),
     });
-    const extractPromise = fetch("/api/extract", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic, ledger, message, turn }),
+
+    extractions.current = extractions.current.then(async () => {
+      try {
+        const res = await fetch("/api/extract", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ topic, ledger: ledgerRef.current, message, turn }),
+        });
+        const body = await res.json();
+        if (!res.ok) throw new Error(body?.error ?? `notebook failed (${res.status})`);
+        writeLedger(body.ledger as Belief[]);
+      } catch (e) {
+        setError(
+          e instanceof Error
+            ? `Pip could not write that down. ${e.message}`
+            : "Pip could not write that down."
+        );
+      } finally {
+        setWritingNotes((n) => n - 1);
+      }
     });
 
     try {
       const replyRes = await replyPromise;
-      if (!replyRes.ok) throw new Error(String(replyRes.status));
-      const reply = (await replyRes.json()) as PupilReply;
+      const body = await replyRes.json();
+      if (!replyRes.ok) throw new Error(body?.error ?? `request failed (${replyRes.status})`);
+      const reply = body as PupilReply;
+      setMood(reply.mood);
       setTranscript((t) => [...t, { role: "pupil", text: reply.reply }]);
-    } catch {
-      setError("Pip lost the thread. Your sentence is still in the notebook. Say the next one.");
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? `Pip lost the thread. ${e.message}`
+          : "Pip lost the thread. Say the next one."
+      );
     } finally {
       setPipThinking(false);
     }
+  }
 
+  async function checkUnderstanding() {
+    if (!checkinConcept || checkinBusy) return;
+    setCheckinBusy(true);
+    setError(null);
     try {
-      const exRes = await extractPromise;
-      if (exRes.ok) {
-        const { ledger: next } = (await exRes.json()) as { ledger: Belief[] };
-        setLedger(next);
-      }
-    } catch {
-      // extraction failure just means the notebook missed a beat
+      const res = await fetch("/api/checkin", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, ledger: ledgerRef.current, concept: checkinConcept }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error ?? `request failed (${res.status})`);
+      const reply = body as PupilReply;
+      setMood(reply.mood);
+      setTranscript((t) => [...t, { role: "pupil", text: reply.reply, checkin: true }]);
+    } catch (e) {
+      setError(
+        e instanceof Error
+          ? `Pip could not explain that back. ${e.message}`
+          : "Pip could not explain that back."
+      );
     } finally {
-      setWritingNotes((n) => n - 1);
+      setCheckinBusy(false);
+      setShowCheckin(false);
+      setCheckinConcept("");
     }
   }
 
@@ -113,7 +232,7 @@ export default function Home() {
       const res = await fetch("/api/exam", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, ledger }),
+        body: JSON.stringify({ topic, ledger, paper }),
       });
       if (!res.ok) {
         const { error } = await res.json();
@@ -134,6 +253,7 @@ export default function Home() {
           if (msg.kind === "stage") setExamStage(msg.stage);
           else if (msg.kind === "done") {
             setResult({ questions: msg.questions, answers: msg.answers, grades: msg.grades });
+            setPaper(msg.questions);
             setPhase("report");
           } else if (msg.kind === "error") throw new Error(msg.message);
         }
@@ -145,6 +265,7 @@ export default function Home() {
   }
 
   function teachTheGaps() {
+    if (result) setPrevReport(result.grades);
     setResult(null);
     setPhase("lesson");
     setTranscript((t) => [
@@ -157,17 +278,37 @@ export default function Home() {
     setPhase("enroll");
     setTopic("");
     setTranscript([]);
-    setLedger([]);
+    writeLedger([]);
     setResult(null);
+    setPaper(null);
+    setPrevReport(null);
+    setError(null);
+    setMood("curious");
     turnRef.current = 0;
   }
 
-  const score = result
-    ? result.grades.reduce(
-        (s, g) => s + (g.verdict === "correct" ? 1 : g.verdict === "partial" ? 0.5 : 0),
-        0
-      )
-    : 0;
+  function downloadCard() {
+    if (!result) return;
+    const wrongGrade = result.grades.find((g) => g.culpritBeliefId != null);
+    const culprit =
+      wrongGrade?.culpritBeliefId != null ? ledger.find((b) => b.id === wrongGrade.culpritBeliefId) : undefined;
+    const root = culprit ? rootCause(ledger, culprit.id) : undefined;
+    downloadReportCard({
+      topic,
+      grade: gradeLetter(score, result.questions.length),
+      score,
+      total: result.questions.length,
+      starsFilled: result.grades.map((g) => g.verdict === "correct"),
+      worstQuote: root ? { turn: root.turn, quote: root.quote } : undefined,
+    });
+  }
+
+  const score = result ? scoreOf(result.grades) : 0;
+  // Only comparable when the retake sat the same paper, which it does.
+  const prevScore = prevReport ? scoreOf(prevReport) : null;
+  const pct = result?.questions.length ? score / result.questions.length : 0;
+  const stats = result ? coverageStats(result.answers, result.grades) : null;
+  const concepts = Array.from(new Map(ledger.map((b) => [b.concept, b])).values());
 
   return (
     <div className="min-h-screen bg-background text-foreground">
@@ -190,7 +331,7 @@ export default function Home() {
             </h1>
             <p className="mt-3 text-muted-foreground">
               Pip knows nothing. You explain, and every sentence you say becomes
-              a belief in Pip&apos;s notebook — including the sloppy ones. Then
+              a belief on Pip&apos;s live belief map — including the sloppy ones. Then
               Pip sits an exam alone, answering only from what you taught. The
               grade on the report card is yours.
             </p>
@@ -213,13 +354,19 @@ export default function Home() {
                 </Button>
               ))}
             </div>
+            <div className="mt-6 border-t pt-4">
+              <Button variant="link" size="sm" className="px-0" onClick={loadSeedDemo}>
+                Skip the typing — watch a finished report card first
+              </Button>
+            </div>
           </section>
         )}
 
         {phase === "lesson" && (
           <section className="grid gap-6 md:grid-cols-[1fr_340px]">
             <div>
-              <div className="flex items-baseline justify-between">
+              <div className="flex items-center gap-2">
+                <PipFace mood={mood} className="h-7 w-7 text-foreground" />
                 <h2 className="text-lg font-semibold tracking-tight">
                   Teaching Pip: {topic}
                 </h2>
@@ -231,12 +378,14 @@ export default function Home() {
                     className={`max-w-[85%] rounded-md px-3 py-2 text-[15px] leading-6 ${
                       t.role === "teacher"
                         ? "self-end bg-primary text-primary-foreground"
-                        : "self-start bg-secondary"
+                        : t.checkin
+                          ? "self-start border border-dashed bg-secondary/60"
+                          : "self-start bg-secondary"
                     }`}
                   >
                     {t.role === "pupil" && (
                       <span className="mr-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                        Pip
+                        {t.checkin ? "Pip · checking understanding" : "Pip"}
                       </span>
                     )}
                     {t.text}
@@ -269,38 +418,99 @@ export default function Home() {
                   placeholder="Explain something. Pip believes exactly what you say."
                   className="min-h-20 bg-card"
                 />
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="icon"
+                  onClick={() => (speech.listening ? speech.stop() : speech.start())}
+                  disabled={!speech.supported}
+                  title={speech.supported ? "Speak your explanation" : "Voice input not supported in this browser"}
+                >
+                  {speech.listening ? <Square className="h-4 w-4" /> : <Mic className="h-4 w-4" />}
+                </Button>
                 <Button onClick={teach} disabled={!draft.trim() || pipThinking}>
                   Teach
                 </Button>
+              </div>
+              <div className="mt-3 flex items-center gap-2">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  disabled={ledger.length === 0}
+                  onClick={() => setShowCheckin((s) => !s)}
+                >
+                  Check understanding
+                </Button>
+                {showCheckin && (
+                  <>
+                    <select
+                      value={checkinConcept}
+                      onChange={(e) => setCheckinConcept(e.target.value)}
+                      className="rounded-md border border-input bg-card px-2 py-1 text-sm"
+                    >
+                      <option value="">pick a concept…</option>
+                      {concepts.map((c) => (
+                        <option key={c.concept} value={c.concept}>
+                          {c.concept}
+                        </option>
+                      ))}
+                    </select>
+                    <Button size="sm" onClick={checkUnderstanding} disabled={!checkinConcept || checkinBusy}>
+                      {checkinBusy ? "asking…" : "Ask Pip"}
+                    </Button>
+                  </>
+                )}
               </div>
             </div>
 
             <aside>
               <div className="flex items-baseline justify-between">
                 <h3 className="text-lg font-semibold tracking-tight">
-                  Pip&apos;s notebook
+                  Pip&apos;s belief map
                 </h3>
                 <span className="text-xs text-muted-foreground">
                   {writingNotes > 0 ? "writing…" : `${ledger.length} beliefs`}
                 </span>
               </div>
-              <div className="mt-4 min-h-[300px] rounded-md border bg-card p-4">
-                {ledger.length === 0 && writingNotes === 0 && (
-                  <p className="text-sm text-muted-foreground">
-                    Empty. Everything you teach lands here — correct, fuzzy, or
-                    flat wrong.
-                  </p>
+              <div className="mt-2 flex gap-1">
+                <Button
+                  variant={tab === "map" ? "secondary" : "ghost"}
+                  size="xs"
+                  onClick={() => setTab("map")}
+                >
+                  Map
+                </Button>
+                <Button
+                  variant={tab === "log" ? "secondary" : "ghost"}
+                  size="xs"
+                  onClick={() => setTab("log")}
+                >
+                  Log
+                </Button>
+              </div>
+              <div className="mt-2 min-h-[300px] rounded-md border bg-card p-4">
+                {tab === "map" ? (
+                  <BeliefGraph beliefs={ledger} />
+                ) : (
+                  <>
+                    {ledger.length === 0 && writingNotes === 0 && (
+                      <p className="text-sm text-muted-foreground">
+                        Empty. Everything you teach lands here — correct, fuzzy, or
+                        flat wrong.
+                      </p>
+                    )}
+                    <div className="space-y-2">
+                      {ledger.map((b) => (
+                        <BeliefChip key={b.id} belief={b} />
+                      ))}
+                      {writingNotes > 0 && (
+                        <p className="animate-pulse text-sm text-muted-foreground">
+                          Pip is writing in the notebook…
+                        </p>
+                      )}
+                    </div>
+                  </>
                 )}
-                <div className="space-y-2">
-                  {ledger.map((b) => (
-                    <BeliefChip key={b.id} belief={b} />
-                  ))}
-                  {writingNotes > 0 && (
-                    <p className="animate-pulse text-sm text-muted-foreground">
-                      Pip is writing in the notebook…
-                    </p>
-                  )}
-                </div>
               </div>
               <Button
                 className="mt-4 w-full"
@@ -321,7 +531,8 @@ export default function Home() {
 
         {phase === "exam" && (
           <section className="mx-auto max-w-xl text-center">
-            <h2 className="text-2xl font-semibold tracking-tight">
+            <PipFace mood="thinking" className="mx-auto h-10 w-10 text-foreground" />
+            <h2 className="mt-3 text-2xl font-semibold tracking-tight">
               Pip is in the exam hall
             </h2>
             <p className="mt-2 text-muted-foreground">You wait outside. No helping now.</p>
@@ -339,7 +550,7 @@ export default function Home() {
           </section>
         )}
 
-        {phase === "report" && result && (
+        {phase === "report" && result && stats && (
           <section className="mx-auto max-w-2xl">
             <div className="rounded-md border-2 border-foreground bg-card p-6">
               <div className="flex items-start justify-between">
@@ -351,7 +562,9 @@ export default function Home() {
                     Pip — {topic}
                   </h2>
                   <p className="mt-1 text-sm text-muted-foreground">
-                    Answered entirely from your teaching. Grade belongs to the teacher.
+                    {prevScore === null
+                      ? "Answered entirely from your teaching. Grade belongs to the teacher."
+                      : "Retake. Same paper, same pupil, better teaching."}
                   </p>
                 </div>
                 <div className="text-right">
@@ -359,6 +572,11 @@ export default function Home() {
                     {gradeLetter(score, result.questions.length)}
                   </div>
                   <div className="mt-1 text-sm tabular-nums text-muted-foreground">
+                    {prevScore !== null && (
+                      <span className="text-muted-foreground/60 line-through">
+                        {prevScore}/{result.questions.length}
+                      </span>
+                    )}{" "}
                     {score}/{result.questions.length}
                   </div>
                 </div>
@@ -369,19 +587,39 @@ export default function Home() {
                 ))}
               </div>
 
+              <div className="mt-4 flex gap-6 text-sm">
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Coverage</p>
+                  <p className="font-medium tabular-nums">{Math.round(stats.coveragePct * 100)}%</p>
+                  <p className="text-xs text-muted-foreground">of the subject you taught</p>
+                </div>
+                <div>
+                  <p className="text-xs uppercase tracking-wide text-muted-foreground">Accuracy</p>
+                  <p className="font-medium tabular-nums">{Math.round(stats.accuracyPct * 100)}%</p>
+                  <p className="text-xs text-muted-foreground">of what you taught was right</p>
+                </div>
+              </div>
+
               <Separator className="my-5" />
 
               <div className="space-y-5">
                 {result.questions.map((q, i) => {
                   const g = result.grades[i];
                   const a = result.answers[i];
+                  const before = prevReport?.[i];
                   const culprit =
                     g.culpritBeliefId != null
                       ? ledger.find((b) => b.id === g.culpritBeliefId)
                       : undefined;
+                  const culpritRoot = culprit ? rootCause(ledger, culprit.id) : undefined;
                   return (
                     <div key={i}>
                       <div className="flex items-center gap-2">
+                        {before && before.verdict !== g.verdict && (
+                          <span className="text-xs text-muted-foreground/60 line-through">
+                            {before.verdict}
+                          </span>
+                        )}
                         <VerdictChip verdict={g.verdict} />
                         <p className="text-sm font-medium">{q.q}</p>
                       </div>
@@ -394,6 +632,11 @@ export default function Home() {
                           Traced to your lesson, turn {culprit.turn}: &ldquo;{culprit.quote}&rdquo;
                         </p>
                       )}
+                      {culpritRoot && culprit && culpritRoot.id !== culprit.id && (
+                        <p className="mt-1 rounded-md border border-destructive/30 bg-destructive/5 p-2 text-xs text-destructive">
+                          That belief was itself built on turn {culpritRoot.turn}: &ldquo;{culpritRoot.quote}&rdquo;
+                        </p>
+                      )}
                     </div>
                   );
                 })}
@@ -401,9 +644,9 @@ export default function Home() {
 
               <Separator className="my-5" />
               <p className="font-hand text-2xl text-destructive">
-                {score / result.questions.length >= 0.8
+                {pct >= 0.8
                   ? "A pleasure to teach. Whoever taught this child knew their stuff."
-                  : score / result.questions.length >= 0.5
+                  : pct >= 0.5
                     ? "Bright student, patchy lessons. See the red boxes above."
                     : "Pip tried. The teaching did not. Teach the gaps and send them back."}
               </p>
@@ -411,6 +654,9 @@ export default function Home() {
 
             <div className="mt-6 flex gap-3">
               <Button onClick={teachTheGaps}>Teach the gaps, retake</Button>
+              <Button variant="outline" onClick={downloadCard}>
+                Download report card
+              </Button>
               <Button variant="outline" onClick={reset}>
                 New topic
               </Button>
