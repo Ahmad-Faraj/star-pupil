@@ -1,9 +1,16 @@
 import { NextRequest } from "next/server";
 import { Belief, explainConcept } from "@/lib/student";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
+  if (!rateLimit(req, 15, 10 * 60 * 1000)) {
+    return Response.json(
+      { error: "Enough checking for now. Try again in a few minutes." },
+      { status: 429 }
+    );
+  }
   const { topic, ledger, concept } = (await req.json()) as {
     topic?: string;
     ledger?: Belief[];

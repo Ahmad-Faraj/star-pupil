@@ -1,9 +1,17 @@
 import { NextRequest } from "next/server";
 import { Belief, ExamQuestion, generateExam, gradeExam, sitExam } from "@/lib/student";
+import { rateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 300;
 
 export async function POST(req: NextRequest) {
+  // An exam is three model calls, so it gets the tightest cap.
+  if (!rateLimit(req, 6, 10 * 60 * 1000)) {
+    return Response.json(
+      { error: "The exam hall is booked out. Try again in a few minutes." },
+      { status: 429 }
+    );
+  }
   // A retake sends the paper back. Pip must sit the SAME questions or the two
   // grades cannot be compared, and comparing them is the point of a retake.
   const { topic, ledger, paper } = (await req.json()) as {
