@@ -18,10 +18,25 @@ const caveat = Caveat({
   weight: ["500", "600"],
 });
 
+const description =
+  "Teach an AI student and watch its beliefs form in real time. It sits the exam alone. The report card grades you.";
+
 export const metadata: Metadata = {
+  metadataBase: new URL("https://star-pupil.vercel.app"),
   title: "Star Pupil",
-  description:
-    "Teach an AI student and watch its beliefs form in real time. It sits the exam alone. The report card grades you.",
+  description,
+  openGraph: {
+    title: "Star Pupil",
+    description,
+    url: "/",
+    siteName: "Star Pupil",
+    type: "website",
+  },
+  twitter: {
+    card: "summary_large_image",
+    title: "Star Pupil",
+    description,
+  },
 };
 
 export default function RootLayout({
