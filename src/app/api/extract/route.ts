@@ -16,6 +16,13 @@ export async function POST(req: NextRequest) {
       { status: 400 }
     );
   }
-  const next = await extractBeliefs(topic, ledger ?? [], message, turn);
-  return Response.json({ ledger: next });
+  try {
+    const next = await extractBeliefs(topic, ledger ?? [], message, turn);
+    return Response.json({ ledger: next });
+  } catch (err) {
+    return Response.json(
+      { error: err instanceof Error ? err.message : "the notebook failed" },
+      { status: 500 }
+    );
+  }
 }

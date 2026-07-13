@@ -13,6 +13,13 @@ export async function POST(req: NextRequest) {
   if (!topic || !message?.trim()) {
     return Response.json({ error: "topic and message are required" }, { status: 400 });
   }
-  const reply = await pupilReply(topic, ledger ?? [], transcript ?? [], message);
-  return Response.json(reply);
+  try {
+    const reply = await pupilReply(topic, ledger ?? [], transcript ?? [], message);
+    return Response.json(reply);
+  } catch (err) {
+    return Response.json(
+      { error: err instanceof Error ? err.message : "Pip could not answer" },
+      { status: 500 }
+    );
+  }
 }

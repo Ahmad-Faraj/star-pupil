@@ -38,8 +38,9 @@ export async function generateJson<T>(
     },
   };
 
-  // 5xx gets retried with backoff; a throttled model (429) drops down the
-  // model ladder instead of waiting out the quota window.
+  // 5xx gets retried with backoff, then drops down the model ladder; a
+  // throttled model (429) drops down immediately instead of waiting out the
+  // quota window. Only a non-retryable 4xx aborts the ladder.
   const maxAttempts = 3;
   let lastError = "";
   for (const model of TIERS[opts.tier ?? "smart"]) {
@@ -62,14 +63,15 @@ export async function generateJson<T>(
 
       lastError = `${res.status} on ${model}: ${(await res.text()).slice(0, 200)}`;
       if (res.status === 429) break; // throttled — next model
-      if (res.status < 500 || attempt === maxAttempts) {
+      if (res.status < 500) {
         throw new Error(`LLM request failed (${lastError})`);
       }
+      if (attempt === maxAttempts) break; // model is down — next model
       await new Promise((r) => setTimeout(r, 1500 * 2 ** (attempt - 1)));
     }
   }
   console.error("llm: every model failed —", lastError);
   throw new Error(
-    "The free Gemini tier is out of quota right now. Wait a minute and try again."
+    "Gemini is overloaded or out of free quota right now. Wait a minute and try again."
   );
 }
