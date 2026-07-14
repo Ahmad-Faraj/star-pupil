@@ -459,8 +459,11 @@ ${beliefs}
 ${items}
 
 For each question:
-- verdict: correct | partial | wrong | blank (blank = confessed, no real answer)
-  Grade like a fair teacher, not a pedant: an answer that is true and captures
+- verdict: correct | partial | wrong | blank
+  An answer marked "(confessed: not covered)" is ALWAYS blank, however good the
+  guess in it looks. A mark can only be earned from the lesson, and Pip guessing
+  right from outside it is worth nothing. Explain those as a gap in the teaching.
+  Grade the rest like a fair teacher, not a pedant: an answer that is true and captures
   the essence of LOOKING FOR in plain words is correct even without the
   technical term. If it is true and on-topic but misses the specific detail,
   that is partial, not wrong. Reserve wrong for answers a domain expert would
@@ -477,5 +480,22 @@ Return JSON: {"grades": [{"verdict", "explanation", "culpritBeliefId"}]} in orde
     tier: "smart",
     responseSchema: GRADE_SCHEMA,
   });
-  return (grades ?? []).map((g) => ({ ...g, culpritBeliefId: g.culpritBeliefId ?? null }));
+  // The one rule the grader is not allowed to break. Asked politely, Gemini marks
+  // a confessed gap blank and Groq hands it full marks for a guess it made from
+  // the model's own knowledge of the subject, which quietly turns the score into
+  // a measure of what the model knows instead of what you taught. So the verdict
+  // is overruled here rather than requested in the prompt. The guess still shows
+  // on the report card. It just earns nothing.
+  return (grades ?? []).map((g, i) => {
+    const confessed = answers[i]?.confessed && !answers[i]?.usedBeliefIds?.length;
+    if (confessed && g.verdict !== "blank") {
+      return {
+        verdict: "blank" as const,
+        explanation:
+          "The lesson never covered this, so there is no mark. Pip guessed from outside the ledger, and a guess is not something you taught him.",
+        culpritBeliefId: null,
+      };
+    }
+    return { ...g, culpritBeliefId: g.culpritBeliefId ?? null };
+  });
 }

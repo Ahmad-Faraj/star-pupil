@@ -1047,7 +1047,13 @@ export default function Home() {
                         <VerdictChip verdict={g.verdict} />
                         <p className="text-sm font-medium">{q.q}</p>
                       </div>
-                      <p className="mt-2 font-hand text-xl leading-6">
+                      {/* A blank is Pip guessing from outside the ledger. Show the
+                          guess, but greyed: it is not an answer you earned. */}
+                      <p
+                        className={`mt-2 font-hand text-xl leading-6 ${
+                          g.verdict === "blank" ? "text-muted-foreground/70" : ""
+                        }`}
+                      >
                         {a?.answer ?? "(no answer)"}
                       </p>
                       <p className="mt-1 text-sm text-muted-foreground">{g.explanation}</p>
