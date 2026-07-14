@@ -1,8 +1,8 @@
 // Thin LLM provider layer. Gemini today; swappable without touching the engine.
-// Two tiers: "smart" carries the calls where quality is the product (planting
-// and fact-checking lies), "fast" carries the style check. Each tier is a
-// ladder that steps down when a model is throttled. gemini-flash-latest and
-// 3.5-flash are unusable here: ~20 free requests per day.
+// Two tiers: "smart" carries the calls where quality is the product (belief
+// extraction, exam writing, grading), "fast" carries Pip's in-character chat.
+// Each tier is a ladder that steps down when a model is throttled.
+// gemini-flash-latest and 3.5-flash are unusable here: ~20 free requests/day.
 
 const TIERS = {
   smart: [
@@ -55,10 +55,23 @@ export async function generateJson<T>(
       });
 
       if (res.ok) {
+        // A 200 with no content (safety block) or truncated JSON is a model
+        // blip, not a caller error — treat it like a 5xx and keep climbing
+        // down the ladder instead of aborting.
         const data = await res.json();
         const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!raw) throw new Error("LLM returned no content");
-        return JSON.parse(raw) as T;
+        if (raw) {
+          try {
+            return JSON.parse(raw) as T;
+          } catch {
+            lastError = `unparseable JSON from ${model}`;
+          }
+        } else {
+          lastError = `empty response from ${model} (${data?.candidates?.[0]?.finishReason ?? "no candidates"})`;
+        }
+        if (attempt === maxAttempts) break;
+        await new Promise((r) => setTimeout(r, 1500 * 2 ** (attempt - 1)));
+        continue;
       }
 
       lastError = `${res.status} on ${model}: ${(await res.text()).slice(0, 200)}`;

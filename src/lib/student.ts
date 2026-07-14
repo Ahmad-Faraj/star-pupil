@@ -86,7 +86,9 @@ Rules:
 5. Use op "update" with the id when the new message revises an existing
    belief (a correction should flip wrong->correct and keep the new quote).
 6. Do not invent beliefs the words don't support. 0 ops is a valid answer for
-   small talk.
+   small talk. Never create a second belief with the same concept label as an
+   existing one — if the message touches a concept already in the ledger,
+   that is an update to it, not an add.
 7. "derivedFrom": if this belief is Pip REASONING FORWARD from an earlier
    belief rather than a fresh fact (e.g. the teacher draws a conclusion that
    only follows because of what was said before), list the id(s) of the
@@ -243,7 +245,16 @@ export async function explainConcept(
   ledger: Belief[],
   concept: string
 ): Promise<PupilReply> {
-  const related = ledger.filter((b) => b.concept === concept);
+  // The teacher types the concept freehand, so match loosely against both the
+  // label and the statement. No match at all is the honest case that makes
+  // this feature worth having: ask about something untaught and Pip says so.
+  const q = concept.trim().toLowerCase();
+  const related = ledger.filter(
+    (b) =>
+      b.concept.toLowerCase().includes(q) ||
+      q.includes(b.concept.toLowerCase()) ||
+      b.statement.toLowerCase().includes(q)
+  );
   const beliefs = related.map((b) => `- ${b.statement}`).join("\n");
 
   const prompt = `You are Pip, a student learning "${topic}". Your teacher just asked you to
@@ -363,7 +374,15 @@ export async function sitExam(
   ledger: Belief[],
   questions: ExamQuestion[]
 ): Promise<ExamAnswer[]> {
-  const beliefs = ledger.map((b) => `#${b.id}: ${b.statement}`).join("\n");
+  // Fuzzy beliefs carry their doubt into the exam — Pip hedges in chat, so a
+  // confident answer built on the same shaky note would break character. Pip
+  // is never told which beliefs are wrong; that would be cheating in reverse.
+  const beliefs = ledger
+    .map(
+      (b) =>
+        `#${b.id}: ${b.statement}${b.status === "fuzzy" ? " (you are not sure you understood this one)" : ""}`
+    )
+    .join("\n");
   const qs = questions.map((q, i) => `${i + 1}. ${q.q}`).join("\n");
 
   const prompt = `You are Pip, sitting an exam on "${topic}". This test is really grading your
@@ -377,6 +396,8 @@ For each question:
 - Answer from your beliefs, citing the ids you used in "usedBeliefIds".
 - If your beliefs are wrong, your answer will be wrong. That is correct
   behavior. Do not fix it.
+- If a belief you rely on is marked "not sure", let the doubt show in the
+  answer ("I think...", "if I understood right...") instead of stating it flat.
 - If no belief covers the question, say honestly that the lesson never
   covered it (confessed: true) — you may take one in-character guess.
 
@@ -441,6 +462,11 @@ ${items}
 
 For each question:
 - verdict: correct | partial | wrong | blank (blank = confessed, no real answer)
+  Grade like a fair teacher, not a pedant: an answer that is true and captures
+  the essence of LOOKING FOR in plain words is correct even without the
+  technical term. If it is true and on-topic but misses the specific detail,
+  that is partial, not wrong. Reserve wrong for answers a domain expert would
+  actually call false.
 - explanation: one or two sentences, plain language
 - culpritBeliefId: when the verdict is wrong or partial BECAUSE of a specific
   belief, give that belief's id. Omit it when the problem is a gap (blank) or
