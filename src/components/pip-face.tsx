@@ -104,40 +104,60 @@ function useStillness(): boolean {
 // stay put, which matters more than the eyes do: the brows are where Open Peeps
 // keeps the emotion (tired's droop, concerned's arch). Only the eyes close.
 //
-// The lids need moving. EyesClosed is drawn with its features sitting ~30 units
-// higher on the face than most of the others, so grafted raw the lids land on
-// his forehead. Each face carries the offset that drops them onto its own eyes.
-// All numbers below were measured off the rendered geometry, not guessed.
+// Three things about that path have to survive the operation. Skip any one of
+// them and the blink redraws Pip as a different, misaligned boy several times a
+// minute, which is worse than not blinking at all:
+//
+//   - its TRANSFORM. Each face is drawn around its own origin and then moved
+//     into place by a translate on the path itself, and no two faces share one
+//     (Concerned 61,70; SmileNM 59,52). Read the "d" alone and the rebuilt face
+//     lands ~60 units up and to the left: the mouth climbs into the glasses.
+//   - its FILL RULE, which is evenodd. That is what hollows out the open mouth
+//     and the whites of the eyes. Drop it and they fill in solid black.
+//   - the LIDS' own transform, which matches no face's.
+//
+// With all three honoured the lids already land nearly on each face's eyes, and
+// dx/dy below is the last few units of nudge. They were measured by rasterising
+// each face's eye subpaths and the lids and comparing the ink, not by eye.
 type EyeSurgery = { eyes: number[]; dx: number; dy: number };
 
 const BLINK: Partial<Record<FaceType, EyeSurgery>> = {
-  SmileNM: { eyes: [2, 3], dx: -5, dy: 31 },
-  Cheeky: { eyes: [2, 3], dx: -13, dy: 36 },
-  Concerned: { eyes: [2, 3], dx: -14, dy: 20 },
-  Tired: { eyes: [2, 3], dx: -8, dy: 25 },
-  Driven: { eyes: [2, 3], dx: 6, dy: 17 },
-  CalmNM: { eyes: [2, 3], dx: -9, dy: 24 },
-  Awe: { eyes: [2, 3, 4, 5, 6, 7], dx: -1, dy: 53 },
+  SmileNM: { eyes: [2, 3], dx: 12, dy: 3 },
+  Cheeky: { eyes: [2, 3], dx: -3, dy: 11 },
+  Concerned: { eyes: [2, 3], dx: 5, dy: 8 },
+  Tired: { eyes: [2, 3], dx: -2, dy: 5 },
+  Driven: { eyes: [2, 3], dx: 5, dy: 0 },
+  CalmNM: { eyes: [2, 3], dx: -2, dy: 8 },
+  Awe: { eyes: [2, 3, 4, 5, 6, 7], dx: -6, dy: 9 },
   // Cute and CheersNM are absent on purpose: Pip's eyes are already shut in
   // both, and you cannot blink eyes that are closed. Solemn is absent because
   // its right brow and right eye are drawn as ONE subpath, so removing the eye
   // would take the brow with it and leave his face lopsided.
 };
 
-// Pull a face's subpaths out of react-peeps by calling the piece and reading the
-// path it returns. They are all absolute (every subpath starts with M), which is
-// what makes splitting on the move command safe.
-function subpaths(face: FaceType): string[] {
+// A face as react-peeps actually draws it: one path, carrying its own placement.
+type Drawn = { d: string; transform: string };
+
+function drawn(face: FaceType): Drawn {
   const piece = Face[face] as (p: { strokeColor: string }) => ReactElement<{
-    children?: ReactElement<{ d?: string }>[];
+    children?: ReactElement<{ d?: string; transform?: string }>[];
   }>;
-  const d = Children.toArray(piece({ strokeColor: INK }).props.children)
-    .map((k) => (k as ReactElement<{ d?: string }>).props.d ?? "")
-    .join(" ");
-  return d.split(/(?=M)/).filter((s) => s.trim().length > 3);
+  const paths = Children.toArray(piece({ strokeColor: INK }).props.children) as ReactElement<{
+    d?: string;
+    transform?: string;
+  }>[];
+  return {
+    d: paths.map((p) => p.props.d ?? "").join(" "),
+    transform: paths[0]?.props.transform ?? "",
+  };
 }
 
-const LIDS = subpaths("EyesClosed")
+// The subpaths are all absolute (every one starts with M), which is what makes
+// splitting on the move command safe.
+const subpaths = (d: string) => d.split(/(?=M)/).filter((s) => s.trim().length > 3);
+
+const EYES_CLOSED = drawn("EyesClosed");
+const LIDS = subpaths(EYES_CLOSED.d)
   .filter((_, i) => i === 1 || i === 2)
   .join(" ");
 
@@ -145,13 +165,15 @@ const LIDS = subpaths("EyesClosed")
 function BlinkedFace({ face }: { face: FaceType }) {
   const cut = BLINK[face];
   if (!cut) return <FacePiece piece={face} strokeColor={INK} backgroundColor={SKIN} />;
-  const kept = subpaths(face)
+  const src = drawn(face);
+  const kept = subpaths(src.d)
     .filter((_, i) => !cut.eyes.includes(i))
     .join(" ");
   return (
-    <g>
-      <path d={kept} fill={INK} />
-      <path d={LIDS} fill={INK} transform={`translate(${cut.dx} ${cut.dy})`} />
+    <g fill={INK} fillRule="evenodd">
+      <path d={kept} transform={src.transform} />
+      {/* nudge, then the lids' own placement: translate(dx dy) then the lids */}
+      <path d={LIDS} transform={`translate(${cut.dx} ${cut.dy}) ${EYES_CLOSED.transform}`} />
     </g>
   );
 }

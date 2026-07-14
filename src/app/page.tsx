@@ -794,18 +794,17 @@ export default function Home() {
                   )}
                 </div>
               ) : (
-                <div key="log" className="paper-ruled mt-2 flex min-h-[300px] flex-col gap-2 rounded-md border p-3 animate-in fade-in duration-200">
+                <div key="log" className="paper-ruled mt-2 min-h-[300px] rounded-md border pb-2 text-[17px] leading-8 animate-in fade-in duration-200">
                   {ledger.length === 0 && writingNotes === 0 && (
-                    <p className="pl-7 font-hand text-[17px] text-muted-foreground">
-                      Nothing yet. Everything you teach gets stuck in here:
+                    <p className="pl-10 pr-3 font-hand text-muted-foreground">
+                      Nothing yet. Everything you teach lands on these lines:
                       correct, fuzzy, or flat wrong.
                     </p>
                   )}
-                  {ledger.map((b, i) => (
+                  {ledger.map((b) => (
                     <BeliefNote
                       key={b.id}
                       belief={b}
-                      lean={i % 2 === 0 ? -0.5 : 0.6}
                       open={selectedBelief === b.id}
                       root={selectedBelief === b.id ? rootCause(ledger, b.id) : undefined}
                       onToggle={() => focusBelief(b.id)}
@@ -813,7 +812,7 @@ export default function Home() {
                     />
                   ))}
                   {writingNotes > 0 && (
-                    <p className="animate-pulse pl-7 font-hand text-[17px] text-muted-foreground">
+                    <p className="animate-pulse pl-10 pr-3 font-hand text-muted-foreground">
                       Pip is writing…
                     </p>
                   )}
@@ -1132,13 +1131,7 @@ function BeliefFile({
         </button>
       </div>
       <p className="mt-2 font-hand text-lg leading-6">{belief.statement}</p>
-      <div className="relative mt-2 max-w-[95%] -rotate-[0.8deg] rounded-[1px] bg-[oklch(0.955_0.07_100)] p-2.5 pt-3 text-xs leading-4 text-[oklch(0.42_0.02_75)] shadow-[1px_3px_7px_oklch(0.26_0.015_70_/_0.18)]">
-        <span
-          aria-hidden
-          className="absolute -top-1.5 left-1/2 h-3 w-12 -translate-x-1/2 rotate-[2deg] rounded-[1px] bg-[oklch(0.93_0.015_95_/_0.75)] shadow-[0_1px_2px_oklch(0.26_0.015_70_/_0.12)]"
-        />
-        your words, turn {belief.turn}: &ldquo;{belief.quote}&rdquo;
-      </div>
+      <QuoteSticky turn={belief.turn} quote={belief.quote} />
       {belief.status !== "correct" && belief.note && (
         <p className="mt-2 text-xs text-destructive">{belief.note}</p>
       )}
@@ -1207,78 +1200,90 @@ function VerdictChip({ verdict }: { verdict: GradedAnswer["verdict"] }) {
   );
 }
 
-// A belief as a sticky note, stuck onto the ruled page and tinted with the same
-// three colours the map uses, so the two views of Pip's head agree at a glance:
-// gold landed, red is wrong, plain is fuzzy. Notes run the full width of the
-// panel. A note that stops short leaves a column of dead paper beside it.
-const NOTE: Record<Belief["status"], { bg: string; edge: string; ink?: string }> = {
-  correct: { bg: "oklch(0.95 0.055 85)", edge: "oklch(0.82 0.1 85)" },
-  wrong: { bg: "oklch(0.95 0.04 27)", edge: "oklch(0.8 0.11 27)", ink: "var(--destructive)" },
-  fuzzy: { bg: "oklch(0.965 0.008 85)", edge: "oklch(0.86 0.012 85)" },
-};
-
+// A belief is Pip's own handwriting on the ruled page, not a coloured card: the
+// ink stays black so it reads as a child's notes, and the status is carried by
+// the mark in the margin. Gold star landed, red cross is wrong, dot is fuzzy.
+// Tinting the whole line instead made the notebook read as a list of alerts.
 function BeliefNote({
   belief,
-  lean,
   open,
   root,
   onToggle,
   onReveal,
 }: {
   belief: Belief;
-  lean: number;
   open: boolean;
   root: Belief | undefined;
   onToggle: () => void;
   onReveal: () => void;
 }) {
-  const skin = NOTE[belief.status];
-  const mark =
+  const bullet =
     belief.status === "correct" ? (
       <Star fill="full" />
     ) : belief.status === "wrong" ? (
       <span className="font-semibold text-destructive">{"✗"}</span>
     ) : (
-      <span className="text-muted-foreground">{"?"}</span>
+      <span className="text-foreground/80">{"•"}</span>
     );
   return (
-    <div
-      className="w-full rounded-[3px] border shadow-[0_1px_2px_rgba(0,0,0,0.07)] transition-transform hover:-translate-y-px"
-      style={{
-        background: skin.bg,
-        borderColor: skin.edge,
-        transform: `rotate(${open ? 0 : lean}deg)`,
-        color: skin.ink,
-      }}
-    >
-      <button onClick={onToggle} aria-expanded={open} className="block w-full px-3 py-2 text-left">
-        <span className="flex items-baseline gap-2">
-          <span className="w-4 shrink-0 text-center text-[15px] leading-none">{mark}</span>
-          <span className="min-w-0 flex-1 font-hand text-[19px] leading-6">{belief.concept}</span>
+    <div className={open ? "bg-foreground/[0.03]" : undefined}>
+      <button
+        onClick={onToggle}
+        aria-expanded={open}
+        className="block w-full text-left transition-colors hover:bg-foreground/[0.04]"
+      >
+        <span className="flex">
+          {/* the ruled page's margin, left clear so the mark sits in it */}
+          <span className="w-9 shrink-0" aria-hidden />
+          <span className="min-w-0 flex-1 pr-3">
+            <span
+              className={`font-hand text-[19px] ${belief.status === "wrong" ? "text-destructive" : ""}`}
+            >
+              <span className="mr-1.5 inline-block w-4 text-center font-sans text-[15px]">
+                {bullet}
+              </span>
+              {belief.concept}
+            </span>
+          </span>
         </span>
       </button>
       {open && (
-        <div className="animate-in fade-in slide-in-from-top-1 px-3 pb-2 pl-9 duration-200">
-          <p className="font-hand text-[17px] leading-6">{belief.statement}</p>
-          <p className="font-hand text-[15px] leading-6 text-muted-foreground">
-            your words, turn {belief.turn}: &ldquo;{belief.quote}&rdquo;
-          </p>
-          {belief.status !== "correct" && belief.note && (
-            <p className="font-hand text-[15px] leading-6 text-destructive">{belief.note}</p>
-          )}
-          {root && root.id !== belief.id && (
-            <p className="font-hand text-[15px] leading-6 text-destructive/80">
-              built on turn {root.turn}: &ldquo;{root.quote}&rdquo;
-            </p>
-          )}
-          <button
-            onClick={onReveal}
-            className="font-hand text-[15px] underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground"
-          >
-            see it in the lesson
-          </button>
+        <div className="flex animate-in fade-in slide-in-from-top-1 duration-200">
+          <span className="w-9 shrink-0" aria-hidden />
+          <div className="min-w-0 flex-1 pb-2 pr-3">
+            <p className="font-hand text-[17px]">{belief.statement}</p>
+            <QuoteSticky turn={belief.turn} quote={belief.quote} />
+            {belief.status !== "correct" && belief.note && (
+              <p className="mt-1 font-hand text-[15px] text-destructive">{belief.note}</p>
+            )}
+            {root && root.id !== belief.id && (
+              <p className="font-hand text-[15px] text-destructive/80">
+                built on turn {root.turn}: &ldquo;{root.quote}&rdquo;
+              </p>
+            )}
+            <button
+              onClick={onReveal}
+              className="font-hand text-[15px] underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground"
+            >
+              see it in the lesson
+            </button>
+          </div>
         </div>
       )}
+    </div>
+  );
+}
+
+// The teacher's own words, on a sticky note taped to the page. The same note in
+// the map and in the notebook, so the receipt looks the same wherever it turns up.
+function QuoteSticky({ turn, quote }: { turn: number; quote: string }) {
+  return (
+    <div className="relative mt-2 max-w-[95%] -rotate-[0.8deg] rounded-[1px] bg-[oklch(0.955_0.07_100)] p-2.5 pt-3 font-sans text-xs leading-4 text-[oklch(0.42_0.02_75)] shadow-[1px_3px_7px_oklch(0.26_0.015_70_/_0.18)]">
+      <span
+        aria-hidden
+        className="absolute -top-1.5 left-1/2 h-3 w-12 -translate-x-1/2 rotate-[2deg] rounded-[1px] bg-[oklch(0.93_0.015_95_/_0.75)] shadow-[0_1px_2px_oklch(0.26_0.015_70_/_0.12)]"
+      />
+      your words, turn {turn}: &ldquo;{quote}&rdquo;
     </div>
   );
 }
