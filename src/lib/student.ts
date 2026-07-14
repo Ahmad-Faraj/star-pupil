@@ -2,7 +2,7 @@
 // structured beliefs extracted from the teacher's own words, each carrying the
 // exact quote that created it. Pip chats from the ledger, sits the exam from
 // the ledger, and every lost mark traces back to a quote. No hidden knowledge
-// anywhere — that constraint is the product.
+// anywhere. That constraint is the product.
 
 import { generateJson } from "./llm";
 
@@ -26,11 +26,10 @@ export interface ChatTurn {
 
 export interface PupilReply {
   reply: string;
-  mood: "curious" | "confused" | "lightbulb" | "worried";
 }
 
 // ---------------------------------------------------------------------------
-// Belief extraction — runs after each teacher message. This is where honest
+// Belief extraction, run after each teacher message. This is where honest
 // misconceptions are born: if the teacher's wording licenses an
 // overgeneralization, we record the WRONG belief a real student would form.
 
@@ -71,7 +70,7 @@ export async function extractBeliefs(
   const prompt = `You maintain the belief state of Pip, a student being taught "${topic}".
 Pip is intelligent but knows nothing about this topic except what the teacher
 has said. You DO know the subject, and your job is to record what a real
-student would now believe after hearing the teacher's latest words — not what
+student would now believe after hearing the teacher's latest words, not what
 the teacher meant, what they SAID.
 
 Rules:
@@ -80,14 +79,14 @@ Rules:
    - "correct": the teacher's words produce an accurate belief
    - "wrong": the words are false, OR they license an overgeneralization a
      real student would make (record the overgeneralized belief itself)
-   - "fuzzy": ambiguous wording — Pip could answer an exam question either way
+   - "fuzzy": ambiguous wording, so Pip could answer an exam question either way
 3. "quote" must be copied VERBATIM from the teacher's message.
 4. "statement" is what Pip believes, first person is fine, one sentence.
 5. Use op "update" with the id when the new message revises an existing
    belief (a correction should flip wrong->correct and keep the new quote).
 6. Do not invent beliefs the words don't support. 0 ops is a valid answer for
    small talk. Never create a second belief with the same concept label as an
-   existing one — if the message touches a concept already in the ledger,
+   existing one. If the message touches a concept already in the ledger,
    that is an update to it, not an add.
 7. "derivedFrom": if this belief is Pip REASONING FORWARD from an earlier
    belief rather than a fresh fact (e.g. the teacher draws a conclusion that
@@ -155,7 +154,7 @@ Return JSON: {"ops": [{"op", "id", "concept", "statement", "status", "quote", "n
 }
 
 // Walks derivedFrom links back from a belief to the earliest non-correct
-// ancestor — the actual root cause when a wrong belief quietly poisoned a
+// ancestor: the actual root cause when a wrong belief quietly poisoned a
 // later, correct-sounding conclusion. Cycle-safe; falls back to the belief
 // itself when it has no wrong ancestry.
 export function rootCause(ledger: Belief[], id: number): Belief | undefined {
@@ -177,15 +176,14 @@ export function rootCause(ledger: Belief[], id: number): Belief | undefined {
 }
 
 // ---------------------------------------------------------------------------
-// Pip's chat reply — fast tier, hard-constrained to the ledger.
+// Pip's chat reply, on the fast tier, hard-constrained to the ledger.
 
 const REPLY_SCHEMA = {
   type: "object",
   properties: {
     reply: { type: "string" },
-    mood: { type: "string", enum: ["curious", "confused", "lightbulb", "worried"] },
   },
-  required: ["reply", "mood"],
+  required: ["reply"],
 };
 
 export async function pupilReply(
@@ -205,7 +203,7 @@ export async function pupilReply(
   const prompt = `You are Pip, a curious student learning "${topic}" from scratch.
 
 THE ONLY THINGS YOU KNOW ABOUT ${topic.toUpperCase()}:
-${beliefs || "(nothing yet — this is your first lesson)"}
+${beliefs || "(nothing yet, this is your first lesson)"}
 
 You have normal everyday knowledge (what water is, what a shop is) but ZERO
 knowledge of ${topic} beyond the list above. Never use facts that are not in
@@ -224,7 +222,7 @@ RECENT CONVERSATION:
 ${recent}
 Teacher: ${teacherMessage}
 
-Return JSON: {"reply", "mood"} (mood: curious | confused | lightbulb | worried)`;
+Return JSON: {"reply"}`;
 
   return generateJson<PupilReply>(prompt, {
     temperature: 0.9,
@@ -236,7 +234,7 @@ Return JSON: {"reply", "mood"} (mood: curious | confused | lightbulb | worried)`
 // ---------------------------------------------------------------------------
 // Check-in: mid-lesson, the teacher can ask Pip to explain a concept back
 // before the exam does. Same ledger-only constraint as the exam, but no
-// grading — this is a formative mirror, not a mark. It reuses the reply
+// grading. This is a formative mirror, not a mark. It reuses the reply
 // schema/mood since it is still Pip talking, just prompted to explain rather
 // than react.
 
@@ -259,18 +257,18 @@ export async function explainConcept(
 
   const prompt = `You are Pip, a student learning "${topic}". Your teacher just asked you to
 explain "${concept}" back in your own words, before any exam. Use ONLY the
-beliefs below — do not reach for outside knowledge of ${topic}, even if it
+beliefs below. Do not reach for outside knowledge of ${topic}, even if it
 would make the answer more correct.
 
 WHAT YOU BELIEVE ABOUT "${concept}":
-${beliefs || "(nothing — you were never taught this)"}
+${beliefs || "(nothing, you were never taught this)"}
 
 If the list is empty, say plainly you were never taught it, do not guess.
 Otherwise explain it back like a student checking their own understanding out
-loud — confident where your beliefs are confident, hedging where they are
+loud, confident where your beliefs are confident, hedging where they are
 fuzzy. 1-3 sentences.
 
-Return JSON: {"reply", "mood"} (mood: curious | confused | lightbulb | worried)`;
+Return JSON: {"reply"}`;
 
   return generateJson<PupilReply>(prompt, {
     temperature: 0.7,
@@ -336,7 +334,7 @@ ${shaky.map((c) => `- ${c}`).join("\n")}\n`
     : "";
 
   const prompt = `Write a fair ${count}-question oral exam on "${topic}" for a student who just
-had an introductory lesson. Cover the core of the topic breadth-first — the
+had an introductory lesson. Cover the core of the topic breadth-first. The
 questions must come from the subject itself, NOT from any particular lesson.
 Short-answer questions, each answerable in 1-3 sentences. For each, state what
 a correct answer must contain in "lookingFor".
@@ -374,7 +372,7 @@ export async function sitExam(
   ledger: Belief[],
   questions: ExamQuestion[]
 ): Promise<ExamAnswer[]> {
-  // Fuzzy beliefs carry their doubt into the exam — Pip hedges in chat, so a
+  // Fuzzy beliefs carry their doubt into the exam. Pip hedges in chat, so a
   // confident answer built on the same shaky note would break character. Pip
   // is never told which beliefs are wrong; that would be cheating in reverse.
   const beliefs = ledger
@@ -399,7 +397,7 @@ For each question:
 - If a belief you rely on is marked "not sure", let the doubt show in the
   answer ("I think...", "if I understood right...") instead of stating it flat.
 - If no belief covers the question, say honestly that the lesson never
-  covered it (confessed: true) — you may take one in-character guess.
+  covered it (confessed: true), you may take one in-character guess.
 
 QUESTIONS:
 ${qs}
@@ -453,7 +451,7 @@ export async function gradeExam(
 
   const prompt = `You are grading an exam on "${topic}" with full domain knowledge. Pip's
 answers were produced ONLY from the belief ledger below, so wrong answers are
-the teacher's fault — your job is to say which belief caused each lost mark.
+the teacher's fault. Your job is to say which belief caused each lost mark.
 
 LEDGER:
 ${beliefs}

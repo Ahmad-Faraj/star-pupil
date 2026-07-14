@@ -1,9 +1,9 @@
 // A pre-baked lesson and exam, played back with no API calls. Two jobs: let a
 // judge see the whole loop in one click without teaching from scratch, and
 // give a live demo something to fall back on if Gemini's free tier is
-// throttled mid-judging. Deliberately the same shape as a real session —
+// throttled mid-judging. Deliberately the same shape as a real session:
 // including one planted wrong belief, one uncovered gap, and one derived
-// (built-on-a-wrong-belief) chain — so it exercises the same UI paths.
+// (built-on-a-wrong-belief) chain, so it exercises the same UI paths.
 
 import { Belief, ChatTurn, ExamAnswer, ExamQuestion, GradedAnswer } from "./student";
 
@@ -14,11 +14,11 @@ export const SEED_TRANSCRIPT: ChatTurn[] = [
   { role: "teacher", text: "A hash table turns a key into an array index using a hash function." },
   {
     role: "pupil",
-    text: "Got it — so the hash function is basically a formula that spits out where in the array my key lives?",
+    text: "Got it, so the hash function is basically a formula that spits out where in the array my key lives?",
   },
   {
     role: "teacher",
-    text: "Right. And when two keys hash to the same index, that's called a collision — chaining handles it by keeping a small linked list at that index.",
+    text: "Right. And when two keys hash to the same index, that's called a collision, and chaining handles it by keeping a small linked list at that index.",
   },
   {
     role: "pupil",
@@ -60,7 +60,7 @@ export const SEED_LEDGER: Belief[] = [
       "A collision is when two keys hash to the same index; chaining handles it by keeping a small list at that index.",
     status: "correct",
     quote:
-      "And when two keys hash to the same index, that's called a collision — chaining handles it by keeping a small linked list at that index.",
+      "And when two keys hash to the same index, that's called a collision, and chaining handles it by keeping a small linked list at that index.",
     turn: 2,
     note: "",
     derivedFrom: [],
@@ -84,7 +84,7 @@ export const SEED_LEDGER: Belief[] = [
     quote: "So a hash table is always the better choice than a sorted array whenever you need fast lookups.",
     turn: 4,
     note:
-      "Builds directly on the earlier 'always O(1)' overgeneralization — if lookup isn't actually always O(1), the comparison it's used to justify doesn't hold either.",
+      "Builds directly on the earlier 'always O(1)' overgeneralization. If lookup isn't actually always O(1), the comparison it's used to justify doesn't hold either.",
     derivedFrom: [3],
   },
 ];
@@ -113,7 +113,7 @@ export const SEED_EXAM: ExamQuestion[] = [
   {
     q: "Is a hash table always the better choice over a sorted array when you need fast lookups?",
     lookingFor:
-      "not always — the average O(1) advantage disappears under heavy collisions, and a sorted structure wins when order or range queries matter",
+      "not always. The average O(1) advantage disappears under heavy collisions, and a sorted structure wins when order or range queries matter",
   },
 ];
 
@@ -131,12 +131,12 @@ export const SEED_ANSWERS: ExamAnswer[] = [
   },
   {
     answer:
-      "The lesson never covered how the hash code actually gets turned into a real array index — I only know it 'becomes an index' somehow.",
+      "The lesson never covered how the hash code actually gets turned into a real array index. I only know it 'becomes an index' somehow.",
     usedBeliefIds: [],
     confessed: true,
   },
   {
-    answer: "Yes — lookup is always O(1), no matter what. That's what I was taught.",
+    answer: "Yes, lookup is always O(1), no matter what. That's what I was taught.",
     usedBeliefIds: [3],
     confessed: false,
   },
@@ -157,7 +157,7 @@ export const SEED_GRADES: GradedAnswer[] = [
   { verdict: "correct", explanation: "Names the collision and chaining correctly.", culpritBeliefId: null },
   {
     verdict: "blank",
-    explanation: "Never taught how the hash gets bounded into the array size — an honest gap, not a wrong belief.",
+    explanation: "Never taught how the hash gets bounded into the array size: an honest gap, not a wrong belief.",
     culpritBeliefId: null,
   },
   {
@@ -174,7 +174,7 @@ export const SEED_GRADES: GradedAnswer[] = [
   {
     verdict: "wrong",
     explanation:
-      "Repeats the same 'always O(1)' overgeneralization in a new form — if lookup isn't actually always O(1), the comparison to a sorted array doesn't hold either.",
+      "Repeats the same 'always O(1)' overgeneralization in a new form. If lookup isn't actually always O(1), the comparison to a sorted array doesn't hold either.",
     culpritBeliefId: 4,
   },
 ];

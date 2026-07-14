@@ -4,7 +4,7 @@
 // order Pip learned them, so time flows down the page the way a notebook
 // fills; indentation is derivation depth, so a belief reasoned from an earlier
 // one steps right, and a chain of reasoning is literally a staircase. Edges
-// connect a belief to what it was built on — how a red node quietly poisons a
+// connect a belief to what it was built on: how a red node quietly poisons a
 // later, correct-looking one, made visible. Selection lives in the page:
 // clicking a node tells the page, and the page opens the belief's file. The
 // map's own job while something is selected is to dim every row that played
@@ -29,7 +29,7 @@ const GUTTER = 28; // left gutter for turn numbers
 const INDENT = 26; // one derivation step
 const MAX_INDENT = 6;
 
-// Everything the selected belief was built on, plus everything built on it —
+// Everything the selected belief was built on, plus everything built on it:
 // the full blast radius of one sentence, walked in both directions.
 function chainOf(beliefs: Belief[], id: number): Set<number> {
   const byId = new Map(beliefs.map((b) => [b.id, b]));
@@ -57,7 +57,7 @@ function chainOf(beliefs: Belief[], id: number): Set<number> {
 }
 
 // Derivation depth: 0 for a standalone fact, one more than the deepest parent
-// otherwise. Cycle-safe — a cycle just stops counting instead of recursing.
+// otherwise. Cycle-safe: a cycle just stops counting instead of recursing.
 function depthsOf(beliefs: Belief[]): Map<number, number> {
   const byId = new Map(beliefs.map((b) => [b.id, b]));
   const depth = new Map<number, number>();
@@ -103,8 +103,8 @@ export function BeliefGraph({
   if (beliefs.length === 0) {
     return (
       <p className="m-auto max-w-[30ch] text-center text-sm text-muted-foreground">
-        Empty. Everything you teach lands here as a row — correct, fuzzy, or flat
-        wrong — and a belief built on an earlier one steps to the right.
+        Empty. Everything you teach lands here as a row, correct, fuzzy, or flat
+        wrong, and a belief built on an earlier one steps to the right.
       </p>
     );
   }
@@ -122,12 +122,12 @@ export function BeliefGraph({
   const chain = selectedBelief ? chainOf(beliefs, selectedBelief.id) : null;
 
   // Parent-to-child edge: drop out of the parent's underside, curve into the
-  // child's left side — the same gesture a commit graph makes.
+  // child's left side, the same gesture a commit graph makes.
   function edgePath(p: { x: number; y: number }, c: { x: number; y: number }): string {
     const sy = p.y + R;
     const ex = c.x - R - 3;
     if (c.x <= p.x) {
-      // Child no deeper than parent (updates can do this) — swing out left.
+      // Child no deeper than parent (updates can do this), so swing out left.
       return `M ${p.x - R} ${p.y} C ${p.x - 22} ${p.y}, ${ex - 14} ${c.y}, ${ex} ${c.y}`;
     }
     return `M ${p.x} ${sy} C ${p.x} ${(sy + c.y) / 2}, ${p.x} ${c.y}, ${ex} ${c.y}`;
@@ -141,7 +141,7 @@ export function BeliefGraph({
           className="block w-full"
           onClick={() => onSelect(null)}
         >
-          <title>Belief map — taught top to bottom, reasoning steps right</title>
+          <title>Belief map: taught top to bottom, reasoning steps right</title>
           <defs>
             <marker id="edge-arrow" markerWidth="8" markerHeight="8" refX="6" refY="3" orient="auto">
               <path d="M0,0 L6,3 L0,6 Z" fill="oklch(0.7 0.015 75)" />

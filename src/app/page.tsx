@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { NotebookPen, PencilLine, Waypoints } from "lucide-react";
+import { NotebookPen, PencilLine, SkipForward, Waypoints } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -40,7 +40,7 @@ type Tab = "map" | "log";
 
 interface DisplayTurn extends ChatTurn {
   checkin?: boolean;
-  mood?: Mood; // the face Pip made saying it; frozen into the bubble's avatar
+  mood?: Mood; // the face he wore saying it, frozen into the bubble's avatar
 }
 
 interface ExamResult {
@@ -50,7 +50,7 @@ interface ExamResult {
 }
 
 // Everything needed to survive a refresh mid-lesson. A session interrupted
-// mid-exam restores to the lesson — the exam stream is gone either way.
+// mid-exam restores to the lesson: the exam stream is gone either way.
 interface SavedSession {
   phase: Phase;
   topic: string;
@@ -88,10 +88,21 @@ function scoreOf(grades: GradedAnswer[]): number {
   );
 }
 
-// A partial mark is half a point in scoreOf, so it must be half a star too —
-// five gold stars next to "5.5/6" reads like a math error.
+// A partial mark is half a point in scoreOf, so it must be half a star too.
+// Five gold stars next to "5.5/6" reads like a math error.
 function starOf(verdict: GradedAnswer["verdict"]): StarFill {
   return verdict === "correct" ? "full" : verdict === "partial" ? "half" : "empty";
+}
+
+// The face Pip makes about a batch of beliefs. He starts shy and pleased to be
+// here, is happy when what landed was sound, and goes confused the moment you
+// teach him something wrong. One bad belief in the batch outranks any number of
+// good ones, which is the honest reading: he is confused *about something*.
+function moodOfBeliefs(beliefs: Belief[], taughtAnything: number): Mood {
+  if (!beliefs.length) return taughtAnything === 0 ? "shy" : "listening";
+  if (beliefs.some((b) => b.status === "wrong")) return "confused";
+  if (beliefs.some((b) => b.status === "fuzzy")) return "worried";
+  return "happy";
 }
 
 function gradeLetter(score: number, total: number): string {
@@ -106,7 +117,7 @@ function gradeLetter(score: number, total: number): string {
 
 // Coverage asks "how much of the subject did you actually teach"; accuracy
 // asks "of what you taught, how much was right." A confessed gap counts
-// against coverage but not accuracy — Pip refusing to guess is honest, not
+// against coverage but not accuracy. Pip refusing to guess is honest, not
 // wrong.
 function coverageStats(answers: ExamAnswer[], grades: GradedAnswer[]) {
   const total = grades.length;
@@ -136,7 +147,6 @@ export default function Home() {
   const [prevReport, setPrevReport] = useState<GradedAnswer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("map");
-  const [mood, setMood] = useState<Mood>("curious");
   const [showCheckin, setShowCheckin] = useState(false);
   const [checkinConcept, setCheckinConcept] = useState("");
   const [checkinBusy, setCheckinBusy] = useState(false);
@@ -213,7 +223,7 @@ export default function Home() {
     try {
       localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
     } catch {
-      // storage full or blocked — the app just loses refresh insurance
+      // storage full or blocked, so the app just loses refresh insurance
     }
   }, [phase, topic, transcript, ledger, paper, prevReport, result, sealSeen]);
 
@@ -234,7 +244,7 @@ export default function Home() {
     ]);
     // The paper is written now, before any teaching, so it cannot be fitted to
     // the lesson. If this call fails the exam route writes one at exam time
-    // instead — the lesson screen just never claims the seal.
+    // instead, and the lesson screen just never claims the seal.
     paperTopicRef.current = subject;
     setPaperPending(true);
     fetch("/api/paper", {
@@ -267,7 +277,6 @@ export default function Home() {
     setResult({ questions: SEED_EXAM, answers: SEED_ANSWERS, grades: SEED_GRADES });
     setPrevReport(null);
     setError(null);
-    setMood("curious");
     setPhase("report");
   }
 
@@ -320,8 +329,7 @@ export default function Home() {
       const body = await replyRes.json();
       if (!replyRes.ok) throw new Error(body?.error ?? `request failed (${replyRes.status})`);
       const reply = body as PupilReply;
-      setMood(reply.mood);
-      setTranscript((t) => [...t, { role: "pupil", text: reply.reply, mood: reply.mood }]);
+      setTranscript((t) => [...t, { role: "pupil", text: reply.reply }]);
     } catch (e) {
       setError(
         e instanceof Error
@@ -346,8 +354,7 @@ export default function Home() {
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error ?? `request failed (${res.status})`);
       const reply = body as PupilReply;
-      setMood(reply.mood);
-      setTranscript((t) => [...t, { role: "pupil", text: reply.reply, checkin: true, mood: reply.mood }]);
+      setTranscript((t) => [...t, { role: "pupil", text: reply.reply, checkin: true }]);
     } catch (e) {
       setError(
         e instanceof Error
@@ -402,7 +409,7 @@ export default function Home() {
   }
 
   // A node and the sentence that created it are the same thing seen from two
-  // sides. Selecting a belief anywhere — map row, notebook line, chat dot —
+  // sides. Selecting a belief anywhere (map row, notebook note, chat dot)
   // expands its file in place: statement, status, quote, ancestry. Selecting
   // it again folds it back; the map stays dimmed to the belief's chain while
   // it is open, and clicking the map's background clears that.
@@ -441,7 +448,6 @@ export default function Home() {
     setPaper(null);
     setPrevReport(null);
     setError(null);
-    setMood("curious");
     setSelectedBelief(null);
     setShowCheckin(false);
     setCheckinConcept("");
@@ -490,17 +496,42 @@ export default function Home() {
   let teacherCount = 0;
   const turnOfIndex = transcript.map((t) => (t.role === "teacher" ? ++teacherCount : 0));
 
+  // Pip's face is a readout of what you just taught him, not a mood the model
+  // picked. Letting the model choose meant it drew a fresh face every reply and
+  // he churned through expressions for no reason the teacher could see. Now the
+  // beliefs decide: teach him something wrong and he is confused, because he
+  // *is*.
+  const lastTurnBeliefs = beliefsByTurn.get(teacherCount) ?? [];
+  const beliefMood = moodOfBeliefs(lastTurnBeliefs, ledger.length);
+
+  // He has no clock, so he cannot tell you he has been at this an hour. The UI
+  // can: past a dozen turns he starts to flag, unless the last thing he learned
+  // landed, which nobody is too tired for.
+  const flagging = teacherCount >= 12 && beliefMood !== "happy";
+  const deskMood: Mood = pipThinking
+    ? "thinking"
+    : writingNotes > 0
+      ? "writing"
+      : flagging
+        ? "tired"
+        : beliefMood;
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur">
         <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
-          <span className="flex items-center gap-2 font-semibold tracking-tight">
+          <button
+            onClick={reset}
+            aria-label="Star Pupil, back to the start"
+            className="flex items-center gap-2 font-semibold tracking-tight transition-opacity hover:opacity-70"
+          >
             <PipFace
-              mood={phase === "exam" ? "thinking" : phase === "lesson" ? mood : "curious"}
+              mood={phase === "exam" ? "thinking" : phase === "lesson" ? deskMood : "listening"}
+              frozen
               className="h-6 w-6 text-foreground"
             />
             Star Pupil
-          </span>
+          </button>
           <span className="text-sm text-muted-foreground">
             {phase === "lesson" ? (
               <>
@@ -509,7 +540,7 @@ export default function Home() {
                 {writingNotes > 0 ? "Pip is writing…" : beliefCount}
               </>
             ) : phase === "exam" ? (
-              "exam in progress — no helping"
+              "exam in progress, no helping"
             ) : phase === "report" ? (
               <>
                 report card · <span className="text-foreground">{topic}</span>
@@ -524,17 +555,14 @@ export default function Home() {
       <main className="mx-auto max-w-6xl px-6 py-8">
         {phase === "enroll" && (
           <section className="mx-auto max-w-xl animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <PipDesk mood="curious" className="w-44 text-foreground" />
+            <PipDesk mood="listening" className="w-56 text-foreground" />
             <h1 className="mt-4 text-3xl font-semibold tracking-tight">
               Every AI wants to teach you. This one needs a teacher.
             </h1>
             <p className="mt-3 text-muted-foreground">
-              Pip knows nothing. You explain, and every sentence you say becomes
-              a belief on Pip&apos;s live belief map — including the sloppy ones. Then
-              Pip sits an exam alone, answering only from what you taught. The
-              paper is written the moment you enroll, before your first sentence,
-              so it cannot be bent around your lesson. The grade on the report
-              card is yours.
+              Pip knows nothing. Every sentence you say becomes a belief in his
+              head, sloppy ones included. Then he sits an exam alone, on a paper
+              sealed before you said a word. The grade is yours.
             </p>
             <div className="mt-8 flex gap-2">
               <Input
@@ -547,17 +575,26 @@ export default function Home() {
                 Start the lesson
               </Button>
             </div>
-            <div className="mt-3 flex flex-wrap items-center gap-2">
-              <span className="text-sm text-muted-foreground">Ideas:</span>
+            {/* one row, no wrapping: four topics that break onto a second line
+                read as a list to get through rather than a nudge to just start */}
+            <div className="mt-3 flex items-center gap-1.5">
+              <span className="shrink-0 text-sm text-muted-foreground">Ideas:</span>
               {SUGGESTED.map((s) => (
-                <Button key={s} variant="outline" size="sm" onClick={() => enroll(s)}>
+                <Button
+                  key={s}
+                  variant="outline"
+                  size="xs"
+                  className="whitespace-nowrap"
+                  onClick={() => enroll(s)}
+                >
                   {s}
                 </Button>
               ))}
             </div>
             <div className="mt-6 border-t pt-4">
-              <Button variant="link" size="sm" className="px-0" onClick={loadSeedDemo}>
-                Skip the typing — watch a finished report card first
+              <Button variant="outline" onClick={loadSeedDemo}>
+                Skip the typing, watch a finished report card
+                <SkipForward className="h-3.5 w-3.5" aria-hidden />
               </Button>
             </div>
           </section>
@@ -567,7 +604,7 @@ export default function Home() {
           <section className="grid items-start gap-6 animate-in fade-in slide-in-from-bottom-2 duration-500 md:grid-cols-[minmax(0,1fr)_360px] xl:grid-cols-[minmax(0,1fr)_400px]">
             <div>
               <div className="flex items-center gap-2">
-                <PipFace mood={mood} className="h-7 w-7 text-foreground" />
+                <PipFace mood={deskMood} frozen className="h-7 w-7 text-foreground" />
                 <h2 className="text-lg font-semibold tracking-tight">
                   Teaching Pip: {topic}
                 </h2>
@@ -647,14 +684,18 @@ export default function Home() {
                     </div>
                   ) : (
                     <div key={i} className="flex max-w-[85%] items-end gap-1.5 self-start animate-in fade-in slide-in-from-bottom-1 duration-300">
-                      <PipFace mood={t.mood ?? "curious"} className="mb-0.5 h-6 w-6 shrink-0 text-foreground" />
+                      <PipFace
+                        mood={t.mood ?? moodOfBeliefs(beliefsByTurn.get(turnOfIndex[i - 1] ?? 0) ?? [], ledger.length)}
+                        frozen
+                        className="mb-0.5 h-6 w-6 shrink-0 text-foreground"
+                      />
                       {bubble}
                     </div>
                   );
                 })}
                 {pipThinking && (
                   <div className="flex items-center gap-1.5 self-start animate-in fade-in slide-in-from-bottom-1 duration-300">
-                    <PipFace mood="thinking" className="h-6 w-6 shrink-0 text-foreground" />
+                    <PipFace mood="thinking" frozen className="h-6 w-6 shrink-0 text-foreground" />
                     <div className="rounded-md bg-secondary px-3 py-2 text-sm text-muted-foreground">
                       <span className="animate-pulse">Pip is thinking…</span>
                     </div>
@@ -702,7 +743,7 @@ export default function Home() {
                       value={checkinConcept}
                       onChange={(e) => setCheckinConcept(e.target.value)}
                       onKeyDown={(e) => e.key === "Enter" && checkUnderstanding()}
-                      placeholder="anything — even something you never taught"
+                      placeholder="anything, even something you never taught"
                       className="h-8 w-64 bg-card text-sm"
                     />
                     <datalist id="pip-concepts">
@@ -720,19 +761,11 @@ export default function Home() {
 
             <aside className="md:sticky md:top-[72px]">
               <PipDesk
-                mood={pipThinking ? "thinking" : mood}
+                mood={deskMood}
                 writing={writingNotes > 0}
-                className="mx-auto w-40 text-foreground"
+                className="mx-auto w-56 text-foreground"
               />
-              <div className="mt-3 flex items-baseline justify-between">
-                <h3 className="text-lg font-semibold tracking-tight">
-                  Inside Pip&apos;s head
-                </h3>
-                <span className="text-xs text-muted-foreground">
-                  {writingNotes > 0 ? "writing…" : beliefCount}
-                </span>
-              </div>
-              <div className="mt-2 flex gap-1">
+              <div className="mt-3 flex gap-1">
                 <Button
                   variant={tab === "map" ? "secondary" : "ghost"}
                   size="xs"
@@ -761,17 +794,18 @@ export default function Home() {
                   )}
                 </div>
               ) : (
-                <div key="log" className="paper-ruled mt-2 min-h-[300px] rounded-md border pb-2 text-[17px] leading-8 animate-in fade-in duration-200">
+                <div key="log" className="paper-ruled mt-2 flex min-h-[300px] flex-col gap-2 rounded-md border p-3 animate-in fade-in duration-200">
                   {ledger.length === 0 && writingNotes === 0 && (
-                    <p className="pl-10 pr-3 font-hand text-muted-foreground">
-                      Nothing yet. Everything you teach lands on these lines —
+                    <p className="pl-7 font-hand text-[17px] text-muted-foreground">
+                      Nothing yet. Everything you teach gets stuck in here:
                       correct, fuzzy, or flat wrong.
                     </p>
                   )}
-                  {ledger.map((b) => (
-                    <BeliefChip
+                  {ledger.map((b, i) => (
+                    <BeliefNote
                       key={b.id}
                       belief={b}
+                      lean={i % 2 === 0 ? -0.5 : 0.6}
                       open={selectedBelief === b.id}
                       root={selectedBelief === b.id ? rootCause(ledger, b.id) : undefined}
                       onToggle={() => focusBelief(b.id)}
@@ -779,7 +813,7 @@ export default function Home() {
                     />
                   ))}
                   {writingNotes > 0 && (
-                    <p className="animate-pulse pl-10 pr-3 font-hand text-muted-foreground">
+                    <p className="animate-pulse pl-7 font-hand text-[17px] text-muted-foreground">
                       Pip is writing…
                     </p>
                   )}
@@ -831,7 +865,7 @@ export default function Home() {
                           </DialogDescription>
                         </DialogHeader>
                         <div className="mt-3 border-y-[3px] border-double border-foreground/50 py-1 text-center text-[10px] uppercase tracking-[0.2em] text-muted-foreground">
-                          {prevReport ? "Retake — same paper, second sitting" : "Written at enrollment, before the first lesson"}
+                          {prevReport ? "Retake: same paper, second sitting" : "Written at enrollment, before the first lesson"}
                         </div>
                         <ol className="mt-4 space-y-3">
                           {paper.map((q, i) =>
@@ -866,7 +900,7 @@ export default function Home() {
                           )}
                         </ol>
                         <div className="mt-4 flex items-baseline justify-between border-t pt-2 text-[10px] text-muted-foreground">
-                          <span className="font-mono">seal {sealHash ?? "—"}</span>
+                          <span className="font-mono">seal {sealHash ?? "not sealed"}</span>
                           <span className="italic">Total: {paper.length} marks · End of paper</span>
                         </div>
                       </div>
@@ -896,7 +930,7 @@ export default function Home() {
             <PipDesk
               mood="thinking"
               writing={examStage === "sitting"}
-              className="mx-auto w-48 text-foreground"
+              className="mx-auto w-64 text-foreground"
             />
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">
               Pip is in the exam hall
@@ -924,7 +958,8 @@ export default function Home() {
               <div className="flex items-start justify-between">
                 <div className="flex items-start gap-3">
                   <PipFace
-                    mood={pct >= 0.8 ? "lightbulb" : pct >= 0.5 ? "curious" : "worried"}
+                    mood={pct >= 0.8 ? "happy" : pct >= 0.5 ? "curious" : "worried"}
+                    frozen
                     className="mt-1 h-12 w-12 shrink-0 text-foreground"
                   />
                   <div>
@@ -932,7 +967,7 @@ export default function Home() {
                       Report card
                     </p>
                     <h2 className="mt-1 text-2xl font-semibold tracking-tight">
-                      Pip — {topic}
+                      Pip: {topic}
                     </h2>
                     <p className="mt-1 text-sm text-muted-foreground">
                       {prevScore === null
@@ -941,7 +976,7 @@ export default function Home() {
                     </p>
                     {sealHash && sealSeen && (
                       <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-                        paper seal {sealHash} — the same paper you saw at enrollment
+                        paper seal {sealHash}, the same paper you saw at enrollment
                       </p>
                     )}
                   </div>
@@ -1130,7 +1165,7 @@ function BeliefStatusChip({ status }: { status: Belief["status"] }) {
 
 function Star({ fill }: { fill: StarFill }) {
   if (fill === "half") {
-    // A hollow star with its left half painted gold — the clip does the work.
+    // A hollow star with its left half painted gold. The clip does the work.
     return (
       <span className="relative inline-block" aria-hidden>
         <span className="text-border">{"★"}</span>
@@ -1166,74 +1201,76 @@ function VerdictChip({ verdict }: { verdict: GradedAnswer["verdict"] }) {
   );
 }
 
-// One line in Pip's notebook, written like real notes: a bullet per belief.
-// The bullet doubles as the grade — casual black • for ordinary notes, gold ★
-// where the teaching was right, red ✗ where it went wrong (no green: gold
-// already means "correct" everywhere in this app). Clicking a line unfolds
-// the full note right there on the page; clicking again folds it back. The
-// detail lines stay in the hand font at the ruled line-height so they sit on
-// the paper's rules like the rest of the notebook.
-function BeliefChip({
+// A belief as a sticky note, stuck onto the ruled page and tinted with the same
+// three colours the map uses, so the two views of Pip's head agree at a glance:
+// gold landed, red is wrong, plain is fuzzy. Notes run the full width of the
+// panel. A note that stops short leaves a column of dead paper beside it.
+const NOTE: Record<Belief["status"], { bg: string; edge: string; ink?: string }> = {
+  correct: { bg: "oklch(0.95 0.055 85)", edge: "oklch(0.82 0.1 85)" },
+  wrong: { bg: "oklch(0.95 0.04 27)", edge: "oklch(0.8 0.11 27)", ink: "var(--destructive)" },
+  fuzzy: { bg: "oklch(0.965 0.008 85)", edge: "oklch(0.86 0.012 85)" },
+};
+
+function BeliefNote({
   belief,
+  lean,
   open,
   root,
   onToggle,
   onReveal,
 }: {
   belief: Belief;
+  lean: number;
   open: boolean;
   root: Belief | undefined;
   onToggle: () => void;
   onReveal: () => void;
 }) {
-  const bullet =
+  const skin = NOTE[belief.status];
+  const mark =
     belief.status === "correct" ? (
       <Star fill="full" />
     ) : belief.status === "wrong" ? (
       <span className="font-semibold text-destructive">{"✗"}</span>
     ) : (
-      <span className="text-foreground/80">{"•"}</span>
+      <span className="text-muted-foreground">{"?"}</span>
     );
   return (
-    <div className={open ? "bg-foreground/[0.03]" : undefined}>
-      <button
-        onClick={onToggle}
-        aria-expanded={open}
-        className="block w-full text-left transition-colors hover:bg-foreground/[0.04]"
-      >
-        <span className="flex">
-          <span className="w-9 shrink-0" aria-hidden />
-          <span className="min-w-0 flex-1 pr-3">
-            <span className={`font-hand text-[19px] ${belief.status === "wrong" ? "text-destructive" : ""}`}>
-              <span className="mr-1.5 inline-block w-4 text-center font-sans text-[15px]">{bullet}</span>
-              {belief.concept}
-            </span>
-          </span>
+    <div
+      className="w-full rounded-[3px] border shadow-[0_1px_2px_rgba(0,0,0,0.07)] transition-transform hover:-translate-y-px"
+      style={{
+        background: skin.bg,
+        borderColor: skin.edge,
+        transform: `rotate(${open ? 0 : lean}deg)`,
+        color: skin.ink,
+      }}
+    >
+      <button onClick={onToggle} aria-expanded={open} className="block w-full px-3 py-2 text-left">
+        <span className="flex items-baseline gap-2">
+          <span className="w-4 shrink-0 text-center text-[15px] leading-none">{mark}</span>
+          <span className="min-w-0 flex-1 font-hand text-[19px] leading-6">{belief.concept}</span>
         </span>
       </button>
       {open && (
-        <div className="flex animate-in fade-in slide-in-from-top-1 duration-200">
-          <span className="w-9 shrink-0" aria-hidden />
-          <div className="min-w-0 flex-1 pb-1 pr-3">
-            <p className="font-hand text-[17px]">{belief.statement}</p>
-            <p className="font-hand text-[15px] text-muted-foreground">
-              your words, turn {belief.turn}: &ldquo;{belief.quote}&rdquo;
+        <div className="animate-in fade-in slide-in-from-top-1 px-3 pb-2 pl-9 duration-200">
+          <p className="font-hand text-[17px] leading-6">{belief.statement}</p>
+          <p className="font-hand text-[15px] leading-6 text-muted-foreground">
+            your words, turn {belief.turn}: &ldquo;{belief.quote}&rdquo;
+          </p>
+          {belief.status !== "correct" && belief.note && (
+            <p className="font-hand text-[15px] leading-6 text-destructive">{belief.note}</p>
+          )}
+          {root && root.id !== belief.id && (
+            <p className="font-hand text-[15px] leading-6 text-destructive/80">
+              built on turn {root.turn}: &ldquo;{root.quote}&rdquo;
             </p>
-            {belief.status !== "correct" && belief.note && (
-              <p className="font-hand text-[15px] text-destructive">{belief.note}</p>
-            )}
-            {root && root.id !== belief.id && (
-              <p className="font-hand text-[15px] text-destructive/80">
-                built on turn {root.turn}: &ldquo;{root.quote}&rdquo;
-              </p>
-            )}
-            <button
-              onClick={onReveal}
-              className="font-hand text-[15px] underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground"
-            >
-              see it in the lesson
-            </button>
-          </div>
+          )}
+          <button
+            onClick={onReveal}
+            className="font-hand text-[15px] underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground"
+          >
+            see it in the lesson
+          </button>
         </div>
       )}
     </div>

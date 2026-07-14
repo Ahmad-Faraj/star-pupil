@@ -48,7 +48,7 @@ async function main() {
     ]);
     ledger = nextLedger;
     transcript.push({ role: "pupil", text: reply.reply });
-    console.log(`PIP (${reply.mood}): ${reply.reply}`);
+    console.log(`PIP: ${reply.reply}`);
   }
 
   console.log(`\n=== BELIEF LEDGER (${ledger.length}) ===`);

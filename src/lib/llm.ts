@@ -56,7 +56,7 @@ export async function generateJson<T>(
 
       if (res.ok) {
         // A 200 with no content (safety block) or truncated JSON is a model
-        // blip, not a caller error — treat it like a 5xx and keep climbing
+        // blip, not a caller error, so treat it like a 5xx and keep climbing
         // down the ladder instead of aborting.
         const data = await res.json();
         const raw = data?.candidates?.[0]?.content?.parts?.[0]?.text;
@@ -75,15 +75,15 @@ export async function generateJson<T>(
       }
 
       lastError = `${res.status} on ${model}: ${(await res.text()).slice(0, 200)}`;
-      if (res.status === 429) break; // throttled — next model
+      if (res.status === 429) break; // throttled, try the next model
       if (res.status < 500) {
         throw new Error(`LLM request failed (${lastError})`);
       }
-      if (attempt === maxAttempts) break; // model is down — next model
+      if (attempt === maxAttempts) break; // model is down, try the next model
       await new Promise((r) => setTimeout(r, 1500 * 2 ** (attempt - 1)));
     }
   }
-  console.error("llm: every model failed —", lastError);
+  console.error("llm: every model failed:", lastError);
   throw new Error(
     "Gemini is overloaded or out of free quota right now. Wait a minute and try again."
   );

@@ -1,5 +1,5 @@
 // Renders the report card to a canvas and triggers a PNG download. Plain
-// Canvas 2D, no dependency — this only needs to look like the on-screen card,
+// Canvas 2D, no dependency. This only needs to look like the on-screen card,
 // not be pixel-identical to it.
 
 const PAPER = "#f9f7f0";
@@ -44,7 +44,7 @@ export function downloadReportCard(input: ReportCardImageInput) {
   ctx.fillStyle = INK;
   ctx.font = "600 34px Georgia, serif";
   // The giant grade letter starts at w-240; a long topic must stop short of it.
-  ctx.fillText(fitText(ctx, `Pip — ${input.topic}`, w - 240 - 118 - 24), 118, 135);
+  ctx.fillText(fitText(ctx, `Pip: ${input.topic}`, w - 240 - 118 - 24), 118, 135);
 
   drawPipFace(ctx, 82, 108, 26, input.face ?? "okay");
 
@@ -92,7 +92,7 @@ export function downloadReportCard(input: ReportCardImageInput) {
 
   ctx.fillStyle = MUTED;
   ctx.font = "16px Georgia, serif";
-  ctx.fillText("Made with Star Pupil — the report card grades you", 56, h - 40);
+  ctx.fillText("Made with Star Pupil: the report card grades you", 56, h - 40);
   if (input.seal) {
     ctx.font = "13px monospace";
     ctx.textAlign = "right";
