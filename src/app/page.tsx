@@ -24,7 +24,7 @@ import {
   rootCause,
 } from "@/lib/student";
 import { BeliefGraph } from "@/components/belief-graph";
-import { Mood, PipFace, PipSitting } from "@/components/pip-face";
+import { Mood, PipDesk, PipFace } from "@/components/pip-face";
 import { downloadReportCard, StarFill } from "@/lib/report-card-image";
 import {
   SEED_ANSWERS,
@@ -524,7 +524,7 @@ export default function Home() {
       <main className="mx-auto max-w-6xl px-6 py-8">
         {phase === "enroll" && (
           <section className="mx-auto max-w-xl animate-in fade-in slide-in-from-bottom-2 duration-500">
-            <PipSitting mood="curious" className="w-36 text-foreground" />
+            <PipDesk mood="curious" className="w-44 text-foreground" />
             <h1 className="mt-4 text-3xl font-semibold tracking-tight">
               Every AI wants to teach you. This one needs a teacher.
             </h1>
@@ -719,10 +719,10 @@ export default function Home() {
             </div>
 
             <aside className="md:sticky md:top-[72px]">
-              <PipSitting
+              <PipDesk
                 mood={pipThinking ? "thinking" : mood}
                 writing={writingNotes > 0}
-                className="mx-auto w-32 text-foreground"
+                className="mx-auto w-40 text-foreground"
               />
               <div className="mt-3 flex items-baseline justify-between">
                 <h3 className="text-lg font-semibold tracking-tight">
@@ -893,10 +893,10 @@ export default function Home() {
 
         {phase === "exam" && (
           <section className="mx-auto max-w-xl text-center animate-in fade-in duration-500">
-            <PipSitting
+            <PipDesk
               mood="thinking"
               writing={examStage === "sitting"}
-              className="mx-auto w-40 text-foreground"
+              className="mx-auto w-48 text-foreground"
             />
             <h2 className="mt-3 text-2xl font-semibold tracking-tight">
               Pip is in the exam hall
