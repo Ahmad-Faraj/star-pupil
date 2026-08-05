@@ -1,7 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { NotebookPen, PencilLine, SkipForward, Waypoints } from "lucide-react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { toast } from "sonner";
+import { Maximize2, NotebookPen, PencilLine, SkipForward, Waypoints } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,16 +15,22 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
+import { Skeleton } from "@/components/ui/skeleton";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Progress, ProgressLabel, ProgressValue } from "@/components/ui/progress";
 import {
   Belief,
   ChatTurn,
   ExamAnswer,
+  Dispute,
   ExamQuestion,
   GradedAnswer,
   PupilReply,
+  SyllabusNode,
+  conceptStates,
   rootCause,
 } from "@/lib/student";
-import { BeliefGraph } from "@/components/belief-graph";
+import { BeliefMap, MapLegend, Trace, keyOfBelief } from "@/components/belief-map";
 import { Mood, PipDesk, PipFace } from "@/components/pip-face";
 import { downloadReportCard, StarFill } from "@/lib/report-card-image";
 import {
@@ -31,15 +38,18 @@ import {
   SEED_EXAM,
   SEED_GRADES,
   SEED_LEDGER,
+  SEED_SYLLABUS,
   SEED_TOPIC,
   SEED_TRANSCRIPT,
 } from "@/lib/seed-demo";
 
 type Phase = "enroll" | "lesson" | "exam" | "report";
-type Tab = "map" | "log";
 
 interface DisplayTurn extends ChatTurn {
+  // Pip talking because he was asked to, rather than because he was taught
+  // something: the bubble is drawn dashed either way, but it has to say which.
   checkin?: boolean;
+  kind?: "checkin" | "dispute";
   mood?: Mood; // the face he wore saying it, frozen into the bubble's avatar
 }
 
@@ -56,10 +66,12 @@ interface SavedSession {
   topic: string;
   transcript: DisplayTurn[];
   ledger: Belief[];
+  syllabus: SyllabusNode[];
   paper: ExamQuestion[] | null;
   prevReport: GradedAnswer[] | null;
   result: ExamResult | null;
   turn: number;
+  startedAt: number;
   // Whether the seal was actually shown during the lesson. A paper written at
   // exam time (enrollment call failed) has a hash too, but the report must not
   // claim "you saw this at enrollment" about a paper nobody saw.
@@ -68,11 +80,22 @@ interface SavedSession {
 
 const STORAGE_KEY = "star-pupil-session";
 
-// Short human-readable fingerprint of the sealed paper's questions. Shown at
-// enrollment and repeated on the report card: the same eight characters on
-// both is the receipt that Pip sat the paper you saw before you taught.
-async function sealOf(questions: ExamQuestion[]): Promise<string> {
-  const data = new TextEncoder().encode(JSON.stringify(questions.map((q) => q.q)));
+// Short human-readable fingerprint of the sealed documents. Shown at enrollment
+// and repeated on the report card: the same eight characters on both is the
+// receipt that Pip sat the paper you saw before you taught.
+//
+// It covers the map and the mark scheme, not just the question text, and that
+// is the point. A seal over the questions alone leaves the obvious objection
+// open: fix the questions, then decide after the lesson what counts as a right
+// answer, or quietly redraw the subject around what got taught. All three are
+// written at enrollment, so all three go under one seal.
+async function sealOf(questions: ExamQuestion[], syllabus: SyllabusNode[]): Promise<string> {
+  const data = new TextEncoder().encode(
+    JSON.stringify([
+      syllabus.map((n) => [n.id, n.label, n.requires]),
+      questions.map((q) => [q.q, q.lookingFor, q.nodeId ?? ""]),
+    ])
+  );
   const digest = await crypto.subtle.digest("SHA-256", data);
   return Array.from(new Uint8Array(digest).slice(0, 4))
     .map((b) => b.toString(16).padStart(2, "0"))
@@ -138,25 +161,36 @@ export default function Home() {
   const [topic, setTopic] = useState("");
   const [transcript, setTranscript] = useState<DisplayTurn[]>([]);
   const [ledger, setLedger] = useState<Belief[]>([]);
+  const [syllabus, setSyllabus] = useState<SyllabusNode[]>([]);
   const [draft, setDraft] = useState("");
   const [pipThinking, setPipThinking] = useState(false);
   const [writingNotes, setWritingNotes] = useState(0); // pending extractions
   const [examStage, setExamStage] = useState<string>("");
+  const [examScript, setExamScript] = useState<ExamAnswer[]>([]); // Pip's answers, live
   const [result, setResult] = useState<ExamResult | null>(null);
   const [paper, setPaper] = useState<ExamQuestion[] | null>(null);
   const [prevReport, setPrevReport] = useState<GradedAnswer[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("map");
+  const [tab, setTab] = useState("map");
   const [showCheckin, setShowCheckin] = useState(false);
   const [checkinConcept, setCheckinConcept] = useState("");
   const [checkinBusy, setCheckinBusy] = useState(false);
   const [paperPending, setPaperPending] = useState(false);
   const [sealHash, setSealHash] = useState<string | null>(null);
   const [sealSeen, setSealSeen] = useState(false);
-  const [selectedBelief, setSelectedBelief] = useState<number | null>(null);
+  // What the map, the notebook and the chat dots all point at: a syllabus
+  // concept's id, or one off-syllabus belief's key. One selection, three views.
+  const [selected, setSelected] = useState<string | null>(null);
   const [flashTurn, setFlashTurn] = useState<number | null>(null);
+  const [startedAt, setStartedAt] = useState(0);
+  // Which answer's working is open on the report card, and the argument the
+  // teacher is currently having with one of Pip's notes.
+  const [showWorking, setShowWorking] = useState<number | null>(null);
+  const [arguing, setArguing] = useState<number | null>(null);
+  const [objection, setObjection] = useState("");
+  const [disputeBusy, setDisputeBusy] = useState(false);
   const turnRef = useRef(0);
   const chatRef = useRef<HTMLDivElement>(null);
+  const reportMapRef = useRef<HTMLDivElement>(null);
   // Whether the reader is parked at the bottom of the chat. New messages only
   // pull the scroll down when this is true, so scrolling up to reread an old
   // quote doesn't get yanked away by Pip's next reply.
@@ -164,10 +198,12 @@ export default function Home() {
   const paperTopicRef = useRef("");
   // Extraction is the slow call and Pip's reply is the fast one, so the teacher
   // can send the next sentence while the notebook is still being written. Both
-  // guards below exist for that: the ref carries the newest ledger (state would
-  // still be the one from render), and the queue keeps extractions in turn
-  // order so a late reply cannot overwrite the beliefs an earlier one wrote.
+  // guards below exist for that: the refs carry the newest ledger and syllabus
+  // (state would still be the one from render), and the queue keeps extractions
+  // in turn order so a late reply cannot overwrite the beliefs an earlier one
+  // wrote.
   const ledgerRef = useRef<Belief[]>([]);
+  const syllabusRef = useRef<SyllabusNode[]>([]);
   const extractions = useRef<Promise<void>>(Promise.resolve());
 
   useEffect(() => {
@@ -188,14 +224,16 @@ export default function Home() {
       setTopic(s.topic);
       setTranscript(s.transcript);
       writeLedger(s.ledger ?? []);
+      writeSyllabus(s.syllabus ?? []);
       setPaper(s.paper ?? null);
       setPrevReport(s.prevReport ?? null);
       setResult(s.result ?? null);
+      setStartedAt(s.startedAt || Date.now());
       turnRef.current = s.turn ?? 0;
       paperTopicRef.current = s.topic;
       if (s.paper?.length && s.sealSeen) {
         setSealSeen(true);
-        sealOf(s.paper).then(setSealHash);
+        sealOf(s.paper, s.syllabus ?? []).then(setSealHash);
       }
       setPhase(s.phase === "report" && s.result ? "report" : "lesson");
     } catch {
@@ -214,10 +252,12 @@ export default function Home() {
       topic,
       transcript,
       ledger,
+      syllabus,
       paper,
       prevReport,
       result,
       turn: turnRef.current,
+      startedAt,
       sealSeen,
     };
     try {
@@ -225,26 +265,33 @@ export default function Home() {
     } catch {
       // storage full or blocked, so the app just loses refresh insurance
     }
-  }, [phase, topic, transcript, ledger, paper, prevReport, result, sealSeen]);
+  }, [phase, topic, transcript, ledger, syllabus, paper, prevReport, result, startedAt, sealSeen]);
 
   function writeLedger(next: Belief[]) {
     ledgerRef.current = next;
     setLedger(next);
   }
 
+  function writeSyllabus(next: SyllabusNode[]) {
+    syllabusRef.current = next;
+    setSyllabus(next);
+  }
+
   function enroll(t: string) {
     const subject = t.trim();
     setTopic(subject);
     setPhase("lesson");
+    setStartedAt(Date.now());
     setTranscript([
       {
         role: "pupil",
         text: `Okay. I know nothing about ${subject}, and I mean nothing. Teach me.`,
       },
     ]);
-    // The paper is written now, before any teaching, so it cannot be fitted to
-    // the lesson. If this call fails the exam route writes one at exam time
-    // instead, and the lesson screen just never claims the seal.
+    // The map and the paper are written now, before any teaching, so neither
+    // can be fitted to the lesson. If this call fails the exam route writes a
+    // paper at exam time instead, the map falls back to drawing only what got
+    // taught, and the lesson screen never claims the seal.
     paperTopicRef.current = subject;
     setPaperPending(true);
     fetch("/api/paper", {
@@ -256,9 +303,16 @@ export default function Home() {
       .then(({ ok, body }) => {
         if (ok && body.questions?.length && paperTopicRef.current === subject) {
           const questions = body.questions as ExamQuestion[];
+          const map = (body.syllabus ?? []) as SyllabusNode[];
           setPaper(questions);
+          writeSyllabus(map);
           setSealSeen(true);
-          sealOf(questions).then(setSealHash);
+          sealOf(questions, map).then(setSealHash);
+        } else if (!ok) {
+          toast.warning("The examiner's office is busy.", {
+            description:
+              "No sealed map this time. Pip will still sit a paper, written when he walks in.",
+          });
         }
       })
       .catch(() => {})
@@ -269,14 +323,15 @@ export default function Home() {
     setTopic(SEED_TOPIC);
     setTranscript(SEED_TRANSCRIPT);
     writeLedger(SEED_LEDGER);
+    writeSyllabus(SEED_SYLLABUS);
     turnRef.current = 4;
     paperTopicRef.current = SEED_TOPIC;
     setPaper(SEED_EXAM);
+    setStartedAt(Date.now() - 8 * 60 * 1000);
     setSealSeen(true); // the seed replays a session where the seal was shown
-    sealOf(SEED_EXAM).then(setSealHash);
+    sealOf(SEED_EXAM, SEED_SYLLABUS).then(setSealHash);
     setResult({ questions: SEED_EXAM, answers: SEED_ANSWERS, grades: SEED_GRADES });
     setPrevReport(null);
-    setError(null);
     setPhase("report");
   }
 
@@ -285,7 +340,6 @@ export default function Home() {
     if (!message || pipThinking) return;
     stickRef.current = true;
     setDraft("");
-    setError(null);
     const turn = ++turnRef.current;
     const nextTranscript: DisplayTurn[] = [...transcript, { role: "teacher" as const, text: message }];
     setTranscript(nextTranscript);
@@ -308,17 +362,21 @@ export default function Home() {
         const res = await fetch("/api/extract", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ topic, ledger: ledgerRef.current, message, turn }),
+          body: JSON.stringify({
+            topic,
+            ledger: ledgerRef.current,
+            syllabus: syllabusRef.current,
+            message,
+            turn,
+          }),
         });
         const body = await res.json();
         if (!res.ok) throw new Error(body?.error ?? `notebook failed (${res.status})`);
         writeLedger(body.ledger as Belief[]);
       } catch (e) {
-        setError(
-          e instanceof Error
-            ? `Pip could not write that down. ${e.message}`
-            : "Pip could not write that down."
-        );
+        toast.error("Pip could not write that down.", {
+          description: e instanceof Error ? e.message : "The notebook call failed.",
+        });
       } finally {
         setWritingNotes((n) => n - 1);
       }
@@ -331,11 +389,10 @@ export default function Home() {
       const reply = body as PupilReply;
       setTranscript((t) => [...t, { role: "pupil", text: reply.reply }]);
     } catch (e) {
-      setError(
-        e instanceof Error
-          ? `Pip lost the thread. ${e.message}`
-          : "Pip lost the thread. Say the next one."
-      );
+      toast.error("Pip lost the thread.", {
+        description: e instanceof Error ? e.message : "Say the next one.",
+        action: { label: "Put it back", onClick: () => setDraft(message) },
+      });
     } finally {
       setPipThinking(false);
     }
@@ -344,7 +401,6 @@ export default function Home() {
   async function checkUnderstanding() {
     if (!checkinConcept.trim() || checkinBusy) return;
     setCheckinBusy(true);
-    setError(null);
     try {
       const res = await fetch("/api/checkin", {
         method: "POST",
@@ -354,13 +410,14 @@ export default function Home() {
       const body = await res.json();
       if (!res.ok) throw new Error(body?.error ?? `request failed (${res.status})`);
       const reply = body as PupilReply;
-      setTranscript((t) => [...t, { role: "pupil", text: reply.reply, checkin: true }]);
+      setTranscript((t) => [
+        ...t,
+        { role: "pupil", text: reply.reply, checkin: true, kind: "checkin" },
+      ]);
     } catch (e) {
-      setError(
-        e instanceof Error
-          ? `Pip could not explain that back. ${e.message}`
-          : "Pip could not explain that back."
-      );
+      toast.error("Pip could not explain that back.", {
+        description: e instanceof Error ? e.message : "Try again in a moment.",
+      });
     } finally {
       setCheckinBusy(false);
       setShowCheckin(false);
@@ -371,7 +428,7 @@ export default function Home() {
   async function sendToExam() {
     setPhase("exam");
     setExamStage("writing");
-    setError(null);
+    setExamScript([]);
     try {
       const res = await fetch("/api/exam", {
         method: "POST",
@@ -394,27 +451,35 @@ export default function Home() {
         for (const line of lines) {
           if (!line.trim()) continue;
           const msg = JSON.parse(line);
-          if (msg.kind === "stage") setExamStage(msg.stage);
-          else if (msg.kind === "done") {
+          if (msg.kind === "stage") {
+            setExamStage(msg.stage);
+            if (msg.questions) setPaper(msg.questions as ExamQuestion[]);
+            // Pip's script arrives before the grader has read it, so the wait
+            // is spent reading what your own lesson made him write.
+            if (msg.answers) setExamScript(msg.answers as ExamAnswer[]);
+          } else if (msg.kind === "done") {
             setResult({ questions: msg.questions, answers: msg.answers, grades: msg.grades });
             setPaper(msg.questions);
+            setSelected(null);
             setPhase("report");
           } else if (msg.kind === "error") throw new Error(msg.message);
         }
       }
     } catch (e) {
-      setError(e instanceof Error ? e.message : "the exam hall caught fire");
+      toast.error("The exam was abandoned.", {
+        description: e instanceof Error ? e.message : "The exam hall caught fire.",
+      });
       setPhase("lesson");
     }
   }
 
-  // A node and the sentence that created it are the same thing seen from two
-  // sides. Selecting a belief anywhere (map row, notebook note, chat dot)
-  // expands its file in place: statement, status, quote, ancestry. Selecting
-  // it again folds it back; the map stays dimmed to the belief's chain while
-  // it is open, and clicking the map's background clears that.
-  function focusBelief(id: number | null) {
-    setSelectedBelief((cur) => (id !== null && cur === id ? null : id));
+  // A concept and the sentences that built it are the same thing seen from two
+  // sides. Selecting anywhere (map node, notebook row, chat dot) opens that
+  // concept's file: what Pip believes about it, in whose words. Selecting it
+  // again folds it back; the map dims to the concept's blast radius while it is
+  // open, and clicking the map's background clears it.
+  function focusKey(key: string | null) {
+    setSelected((cur) => (key !== null && cur === key ? null : key));
   }
 
   // From the belief's file back to the moment it was taught: scroll the chat
@@ -426,6 +491,77 @@ export default function Home() {
       ?.scrollIntoView({ behavior: "smooth", block: "center" });
     setFlashTurn(belief.turn);
     window.setTimeout(() => setFlashTurn(null), 1400);
+  }
+
+  // On the report card the map is above the questions, so pointing a lost mark
+  // at its concept means nothing unless the map is on screen to watch it land.
+  function showOnMap(nodeId: string) {
+    setShowWorking(null);
+    setSelected(nodeId);
+    reportMapRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  // The route Pip took to one answer, laid over the map. He cites the beliefs
+  // he used, so this is his actual working and not a reconstruction of it.
+  function openWorking(i: number) {
+    if (showWorking === i) {
+      setShowWorking(null);
+      return;
+    }
+    setSelected(null);
+    setShowWorking(i);
+    reportMapRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+
+  // The teacher challenges a note. Pip reads their own sentence back, or admits
+  // he misread it and rewrites the note. Nothing else can move the ledger: a
+  // belief you can argue away is a grade you can argue away.
+  async function dispute(belief: Belief) {
+    const text = objection.trim();
+    if (!text || disputeBusy) return;
+    setDisputeBusy(true);
+    try {
+      const res = await fetch("/api/dispute", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ topic, belief, objection: text }),
+      });
+      const body = await res.json();
+      if (!res.ok) throw new Error(body?.error ?? `request failed (${res.status})`);
+      const out = body as Dispute;
+      setTranscript((t) => [
+        ...t,
+        { role: "pupil", text: out.reply, checkin: true, kind: "dispute" },
+      ]);
+      if (out.verdict === "conceded" && out.statement) {
+        writeLedger(
+          ledgerRef.current.map((b) =>
+            b.id === belief.id
+              ? {
+                  ...b,
+                  statement: out.statement!,
+                  status: out.status ?? b.status,
+                  correction: (out.status ?? b.status) === "correct" ? undefined : b.correction,
+                  disputed: true,
+                }
+              : b
+          )
+        );
+        toast.success("Pip backed down.", {
+          description: "He misread you. The note is rewritten, and the report card will say it was.",
+        });
+      } else {
+        toast("The note stands.", { description: "He read your sentence back to you." });
+      }
+      setArguing(null);
+      setObjection("");
+    } catch (e) {
+      toast.error("Pip could not argue back.", {
+        description: e instanceof Error ? e.message : "Try again in a moment.",
+      });
+    } finally {
+      setDisputeBusy(false);
+    }
   }
 
   function teachTheGaps() {
@@ -443,17 +579,19 @@ export default function Home() {
     setTopic("");
     setTranscript([]);
     writeLedger([]);
+    writeSyllabus([]);
     setDraft("");
     setResult(null);
     setPaper(null);
     setPrevReport(null);
-    setError(null);
-    setSelectedBelief(null);
+    setSelected(null);
     setShowCheckin(false);
     setCheckinConcept("");
     setPaperPending(false);
     setSealHash(null);
     setSealSeen(false);
+    setExamScript([]);
+    setStartedAt(0);
     turnRef.current = 0;
     paperTopicRef.current = "";
   }
@@ -485,8 +623,53 @@ export default function Home() {
   const stats = result ? coverageStats(result.answers, result.grades) : null;
   const concepts = Array.from(new Map(ledger.map((b) => [b.concept, b])).values());
   const beliefCount = `${ledger.length} ${ledger.length === 1 ? "belief" : "beliefs"}`;
-  const openBelief = selectedBelief != null ? ledger.find((b) => b.id === selectedBelief) : undefined;
-  const openBeliefRoot = openBelief ? rootCause(ledger, openBelief.id) : undefined;
+  const states = conceptStates(syllabus, ledger);
+  const lit = Array.from(states.values()).filter((s) => s.state !== "unlit").length;
+  const dark = syllabus.filter((n) => states.get(n.id)?.state === "unlit");
+  const openBeliefs = selected ? ledger.filter((b) => keyOfBelief(b) === selected) : [];
+  const openConcept = selected ? syllabus.find((n) => n.id === selected) : undefined;
+  // Things taught that the sealed map had no place for. Concept-map assessment
+  // calls these extra propositions and counts them separately from gaps,
+  // because they are not a mistake: they are either enrichment or drift, and
+  // only the teacher knows which.
+  const offMap = ledger.filter((b) => !b.nodeId || !states.has(b.nodeId));
+  const offMapConcepts = Array.from(new Set(offMap.map((b) => b.concept)));
+  // One answer's working: not just the beliefs Pip cited, but everything those
+  // were reasoned from, oldest first. Citing "a hash table always beats a
+  // sorted array" and stopping there hides the fact that he only believes it
+  // because of a bad note two turns earlier. The route is the point.
+  const working = useMemo(() => {
+    if (showWorking == null || !result) return { steps: [] as string[], fromMarker: false };
+    const cited = result.answers[showWorking]?.usedBeliefIds ?? [];
+    // Pip cites the notes he used, but on a paper where most questions were
+    // never covered he sometimes leans on a note without naming it. The grader
+    // catches those and names the belief that cost the mark, so the route can
+    // still be drawn. It is a different claim, though: that is the marker's
+    // finding, not Pip's citation, and the caption has to say so.
+    const culprit = result.grades[showWorking]?.culpritBeliefId;
+    const roots = cited.length ? cited : culprit != null ? [culprit] : [];
+    const byId = new Map(ledger.map((b) => [b.id, b]));
+    const seen = new Set<number>();
+    const ordered: Belief[] = [];
+    const walk = (id: number) => {
+      if (seen.has(id)) return;
+      seen.add(id);
+      const b = byId.get(id);
+      if (!b) return;
+      b.derivedFrom.forEach(walk); // ancestors land before what was built on them
+      ordered.push(b);
+    };
+    roots.forEach(walk);
+    return {
+      steps: Array.from(new Set(ordered.map(keyOfBelief))),
+      fromMarker: !cited.length && ordered.length > 0,
+    };
+  }, [showWorking, result, ledger]);
+
+  const workingTrace: Trace | null =
+    showWorking != null && result
+      ? { steps: working.steps, target: result.questions[showWorking]?.nodeId ?? null }
+      : null;
   const beliefsByTurn = new Map<number, Belief[]>();
   for (const b of ledger) {
     const list = beliefsByTurn.get(b.turn) ?? [];
@@ -516,10 +699,23 @@ export default function Home() {
         ? "tired"
         : beliefMood;
 
+  const mapPanel =
+    paperPending && !syllabus.length ? (
+      <MapSkeleton />
+    ) : (
+      <BeliefMap
+        syllabus={syllabus}
+        beliefs={ledger}
+        selected={selected}
+        onSelect={focusKey}
+        className="h-full w-full"
+      />
+    );
+
   return (
     <div className="min-h-screen bg-background text-foreground">
       <header className="sticky top-0 z-40 border-b bg-background/85 backdrop-blur">
-        <div className="mx-auto flex max-w-6xl items-center justify-between px-6 py-3">
+        <div className="mx-auto flex max-w-7xl items-center justify-between px-6 py-3">
           <button
             onClick={reset}
             aria-label="Star Pupil, back to the start"
@@ -532,12 +728,15 @@ export default function Home() {
             />
             Star Pupil
           </button>
-          <span className="text-sm text-muted-foreground">
+          <span className="flex items-center gap-3 text-sm text-muted-foreground">
             {phase === "lesson" ? (
               <>
-                teaching <span className="text-foreground">{topic}</span>
-                {" · "}
-                {writingNotes > 0 ? "Pip is writing…" : beliefCount}
+                <LessonClock since={startedAt} />
+                <span className="hidden sm:inline">
+                  teaching <span className="text-foreground">{topic}</span>
+                  {" · "}
+                  {writingNotes > 0 ? "Pip is writing…" : beliefCount}
+                </span>
               </>
             ) : phase === "exam" ? (
               "exam in progress, no helping"
@@ -552,17 +751,20 @@ export default function Home() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-6xl px-6 py-8">
+      <main className="mx-auto max-w-7xl px-6 py-8">
         {phase === "enroll" && (
-          <section className="mx-auto max-w-xl animate-in fade-in slide-in-from-bottom-2 duration-500">
+          <section className="grid items-center gap-10 animate-in fade-in slide-in-from-bottom-2 duration-500 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+            <div className="mx-auto w-full max-w-xl">
             <PipDesk mood="listening" className="w-56 text-foreground" />
             <h1 className="mt-4 text-3xl font-semibold tracking-tight">
               Every AI wants to teach you. This one needs a teacher.
             </h1>
             <p className="mt-3 text-muted-foreground">
               Pip knows nothing. Every sentence you say becomes a belief in his
-              head, sloppy ones included. Then he sits an exam alone, on a paper
-              sealed before you said a word. The grade is yours.
+              head, sloppy ones included. Before you start, the examiner draws
+              the whole subject as a map and seals a paper against it. You teach
+              in the dark parts. Whatever is still dark at the end is a mark he
+              cannot earn.
             </p>
             <div className="mt-8 flex gap-2">
               <Input
@@ -597,11 +799,13 @@ export default function Home() {
                 <SkipForward className="h-3.5 w-3.5" aria-hidden />
               </Button>
             </div>
+            </div>
+            <EnrollDemo />
           </section>
         )}
 
         {phase === "lesson" && (
-          <section className="grid items-start gap-6 animate-in fade-in slide-in-from-bottom-2 duration-500 md:grid-cols-[minmax(0,1fr)_360px] xl:grid-cols-[minmax(0,1fr)_400px]">
+          <section className="grid items-start gap-6 animate-in fade-in slide-in-from-bottom-2 duration-500 lg:grid-cols-[minmax(0,1fr)_minmax(400px,460px)]">
             <div>
               <div className="flex items-center gap-2">
                 <PipFace mood={deskMood} frozen className="h-7 w-7 text-foreground" />
@@ -638,7 +842,7 @@ export default function Home() {
                     >
                       {t.checkin && (
                         <span className="mr-2 text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                          checking understanding
+                          {t.kind === "dispute" ? "settling an argument" : "checking understanding"}
                         </span>
                       )}
                       {t.text}
@@ -654,10 +858,10 @@ export default function Home() {
                               title={`${b.concept} (${b.status})`}
                               aria-label={`${b.concept} (${b.status})`}
                               onClick={() => {
-                                // The expansion lives in the sidebar, so make
-                                // sure the tab showing it is the open one.
+                                // The file opens in the sidebar, so make sure
+                                // the tab showing it is the open one.
                                 setTab("map");
-                                setSelectedBelief(b.id);
+                                setSelected(keyOfBelief(b));
                               }}
                               className="-my-1.5 p-1.5 transition-transform hover:scale-125"
                             >
@@ -709,7 +913,6 @@ export default function Home() {
                   </p>
                 )}
               </div>
-              {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
               <div className="mt-3 flex gap-2">
                 <Textarea
                   value={draft}
@@ -759,65 +962,117 @@ export default function Home() {
               </div>
             </div>
 
-            <aside className="md:sticky md:top-[72px]">
+            <aside className="lg:sticky lg:top-[72px]">
               <PipDesk
                 mood={deskMood}
                 writing={writingNotes > 0}
-                className="mx-auto w-56 text-foreground"
+                className="mx-auto w-48 text-foreground"
               />
-              <div className="mt-3 flex gap-1">
-                <Button
-                  variant={tab === "map" ? "secondary" : "ghost"}
-                  size="xs"
-                  onClick={() => setTab("map")}
-                >
-                  <Waypoints className="h-3 w-3" aria-hidden /> Map
-                </Button>
-                <Button
-                  variant={tab === "log" ? "secondary" : "ghost"}
-                  size="xs"
-                  onClick={() => setTab("log")}
-                >
-                  <NotebookPen className="h-3 w-3" aria-hidden /> Notebook
-                </Button>
-              </div>
-              {tab === "map" ? (
-                <div key="map" className="mt-2 flex min-h-[300px] flex-col rounded-md border bg-card p-4 animate-in fade-in duration-200">
-                  <BeliefGraph beliefs={ledger} selected={selectedBelief} onSelect={focusBelief} />
-                  {openBelief && (
-                    <BeliefFile
-                      belief={openBelief}
-                      root={openBeliefRoot}
-                      onReveal={() => revealInLesson(openBelief)}
-                      onClose={() => focusBelief(null)}
-                    />
+              <Tabs value={tab} onValueChange={setTab} className="mt-2">
+                <div className="flex items-center gap-2">
+                  <TabsList variant="line">
+                    <TabsTrigger value="map">
+                      <Waypoints className="h-3.5 w-3.5" aria-hidden /> Map
+                    </TabsTrigger>
+                    <TabsTrigger value="log">
+                      <NotebookPen className="h-3.5 w-3.5" aria-hidden /> Notebook
+                    </TabsTrigger>
+                  </TabsList>
+                  {tab === "map" && (syllabus.length > 0 || ledger.length > 0) && (
+                    <Dialog>
+                      <DialogTrigger
+                        render={
+                          <Button variant="ghost" size="xs" className="ml-auto">
+                            <Maximize2 className="h-3 w-3" aria-hidden /> Open the map
+                          </Button>
+                        }
+                      />
+                      {/* the popup is a grid, and auto rows share the height
+                          equally, which left the map in a 200px band with the
+                          caption floating in space. Name the rows instead. */}
+                      <DialogContent className="h-[86vh] max-w-[92vw] grid-rows-[auto_minmax(0,1fr)_auto] sm:max-w-[92vw]">
+                        <DialogHeader>
+                          <DialogTitle className="capitalize">{topic}</DialogTitle>
+                          <DialogDescription>
+                            Every concept a fair lesson covers, drawn before you said a word. Dashed
+                            edges are the subject&rsquo;s own order. Solid edges are Pip reasoning
+                            from one belief to the next.
+                          </DialogDescription>
+                        </DialogHeader>
+                        <div className="min-h-0 flex-1 overflow-hidden rounded-md border bg-card">
+                          {mapPanel}
+                        </div>
+                        <MapLegend lit={lit} total={syllabus.length} />
+                      </DialogContent>
+                    </Dialog>
                   )}
                 </div>
-              ) : (
-                <div key="log" className="paper-ruled mt-2 min-h-[300px] rounded-md border pb-2 text-[17px] leading-8 animate-in fade-in duration-200">
-                  {ledger.length === 0 && writingNotes === 0 && (
-                    <p className="pl-10 pr-3 font-hand text-muted-foreground">
-                      Nothing yet. Everything you teach lands on these lines:
-                      correct, fuzzy, or flat wrong.
-                    </p>
+
+                <TabsContent value="map">
+                  <div className="flex h-[520px] flex-col overflow-hidden rounded-md border bg-card">
+                    {mapPanel}
+                  </div>
+                  <div className="mt-2">
+                    <MapLegend lit={lit} total={syllabus.length} />
+                  </div>
+                  {syllabus.length > 0 && (
+                    <Progress
+                      value={Math.round((lit / syllabus.length) * 100)}
+                      className="mt-3 gap-1"
+                    >
+                      <ProgressLabel className="text-xs text-muted-foreground">
+                        Subject lit
+                      </ProgressLabel>
+                      <ProgressValue className="text-xs" />
+                    </Progress>
                   )}
-                  {ledger.map((b) => (
-                    <BeliefNote
-                      key={b.id}
-                      belief={b}
-                      open={selectedBelief === b.id}
-                      root={selectedBelief === b.id ? rootCause(ledger, b.id) : undefined}
-                      onToggle={() => focusBelief(b.id)}
-                      onReveal={() => revealInLesson(b)}
+                  {(openConcept || openBeliefs.length > 0) && (
+                    <ConceptFile
+                      concept={openConcept}
+                      beliefs={openBeliefs}
+                      ledger={ledger}
+                      onReveal={revealInLesson}
+                      onClose={() => setSelected(null)}
+                      arguing={arguing}
+                      objection={objection}
+                      busy={disputeBusy}
+                      onArgue={(id) => {
+                        setArguing((cur) => (cur === id ? null : id));
+                        setObjection("");
+                      }}
+                      onObjection={setObjection}
+                      onSubmit={dispute}
                     />
-                  ))}
-                  {writingNotes > 0 && (
-                    <p className="animate-pulse pl-10 pr-3 font-hand text-muted-foreground">
-                      Pip is writing…
-                    </p>
                   )}
-                </div>
-              )}
+                </TabsContent>
+
+                <TabsContent value="log">
+                  <div className="paper-ruled min-h-[520px] rounded-md border pb-2 text-[17px] leading-8">
+                    {ledger.length === 0 && writingNotes === 0 && (
+                      <p className="pl-10 pr-3 font-hand text-muted-foreground">
+                        Nothing yet. Everything you teach lands on these lines:
+                        correct, fuzzy, or flat wrong.
+                      </p>
+                    )}
+                    {ledger.map((b) => (
+                      <BeliefNote
+                        key={b.id}
+                        belief={b}
+                        open={selected === keyOfBelief(b)}
+                        root={selected === keyOfBelief(b) ? rootCause(ledger, b.id) : undefined}
+                        onToggle={() => focusKey(keyOfBelief(b))}
+                        onReveal={() => revealInLesson(b)}
+                      />
+                    ))}
+                    {writingNotes > 0 && (
+                      <p className="animate-pulse pl-10 pr-3 font-hand text-muted-foreground">
+                        Pip is writing…
+                      </p>
+                    )}
+                  </div>
+                </TabsContent>
+              </Tabs>
+
               <div className="mt-3 flex items-center justify-between gap-2 rounded-md border bg-card py-2 pl-3 pr-2">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold tracking-tight">The exam paper</p>
@@ -915,17 +1170,24 @@ export default function Home() {
               >
                 Send Pip to the exam
               </Button>
-              {ledger.length < 3 && (
+              {ledger.length < 3 ? (
                 <p className="mt-2 text-center text-xs text-muted-foreground">
                   Teach at least three things first.
                 </p>
+              ) : (
+                dark.length > 0 && (
+                  <p className="mt-2 text-center text-xs text-muted-foreground">
+                    {dark.length} concept{dark.length === 1 ? "" : "s"} still dark. He can only
+                    answer from what is lit.
+                  </p>
+                )
               )}
             </aside>
           </section>
         )}
 
         {phase === "exam" && (
-          <section className="mx-auto max-w-xl text-center animate-in fade-in duration-500">
+          <section className="mx-auto max-w-2xl text-center animate-in fade-in duration-500">
             <PipDesk
               mood="thinking"
               writing={examStage === "sitting"}
@@ -948,6 +1210,53 @@ export default function Home() {
                 red pen comes out
               </StageLine>
             </div>
+
+            {/* The script itself, on the desk. The seal is broken now, so every
+                question is face up: the paper the teacher only saw two lines of
+                is finally readable, and Pip's answers land on it one at a time.
+                Grading is the slowest of the three calls, and it is spent
+                reading what your own lesson made him write, before anybody has
+                said whether it is right. */}
+            {paper && examStage !== "writing" && (
+              <div className="paper-ruled mt-8 rounded-md border pb-4 text-left">
+                <div className="border-b px-10 py-3 text-center font-serif">
+                  <p className="text-[10px] uppercase tracking-[0.3em] text-muted-foreground">
+                    Star Pupil Examination Board
+                  </p>
+                  <p className="text-sm capitalize">
+                    {topic}
+                    <span className="ml-2 text-[10px] uppercase tracking-[0.18em] text-destructive/80">
+                      seal broken
+                    </span>
+                  </p>
+                </div>
+                {paper.map((q, i) => {
+                  const a = examScript[i];
+                  return (
+                    <div key={i} className="pb-3 pl-10 pr-4 pt-2">
+                      <p className="font-serif text-sm leading-6">
+                        {i + 1}. {q.q}
+                      </p>
+                      {a ? (
+                        <p
+                          className={`font-hand text-[19px] leading-8 animate-in fade-in slide-in-from-bottom-1 fill-mode-backwards duration-500 ${
+                            a.confessed ? "text-muted-foreground" : ""
+                          }`}
+                          style={{ animationDelay: `${i * 200}ms` }}
+                        >
+                          {a.answer}
+                        </p>
+                      ) : (
+                        <Skeleton
+                          className="mt-2 h-4 rounded-sm"
+                          style={{ width: `${58 + ((i * 23) % 34)}%` }}
+                        />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
           </section>
         )}
 
@@ -975,7 +1284,7 @@ export default function Home() {
                     </p>
                     {sealHash && sealSeen && (
                       <p className="mt-1 font-mono text-[10px] text-muted-foreground">
-                        paper seal {sealHash}, the same paper you saw at enrollment
+                        seal {sealHash}, the same map and paper you saw at enrollment
                       </p>
                     )}
                   </div>
@@ -1017,7 +1326,118 @@ export default function Home() {
                   <p className="font-medium tabular-nums">{Math.round(stats.accuracyPct * 100)}%</p>
                   <p className="text-xs text-muted-foreground">of what you taught was right</p>
                 </div>
+                {syllabus.length > 0 && (
+                  <div>
+                    <p className="text-xs uppercase tracking-wide text-muted-foreground">The map</p>
+                    <p className="font-medium tabular-nums">
+                      {lit}/{syllabus.length}
+                    </p>
+                    <p className="text-xs text-muted-foreground">concepts you lit</p>
+                  </div>
+                )}
               </div>
+
+              {syllabus.length > 0 && (
+                <>
+                  <Separator className="my-5" />
+                  <div className="animate-in fade-in fill-mode-backwards delay-500 duration-700">
+                    <p className="text-xs font-semibold uppercase tracking-[0.2em] text-muted-foreground">
+                      The lesson, against the map that was sealed first
+                    </p>
+                    <div ref={reportMapRef} className="mt-3 h-[420px] overflow-hidden rounded-md border bg-background">
+                      <BeliefMap
+                        syllabus={syllabus}
+                        beliefs={ledger}
+                        selected={selected}
+                        onSelect={(k) => {
+                          setShowWorking(null);
+                          setSelected(k);
+                        }}
+                        revealMarks
+                        trace={workingTrace}
+                        questionNodeIds={result.questions.flatMap((q) => (q.nodeId ? [q.nodeId] : []))}
+                        className="h-full w-full"
+                      />
+                    </div>
+                    <MapLegend lit={lit} total={syllabus.length} />
+                    {showWorking != null && result && (
+                      <p className="mt-3 text-sm animate-in fade-in duration-200">
+                        {workingTrace && workingTrace.steps.length > 1 ? (
+                          <>
+                            <span className="font-medium">
+                              Question {showWorking + 1}, his working.
+                            </span>{" "}
+                            Numbered in the order he reasoned, each one built on the
+                            one before it, ending on the concept the question was set
+                            on.{" "}
+                            {working.fromMarker
+                              ? "He named no notes for this one; the marker traced the answer back to them."
+                              : "Only the last was cited: the rest are what it rests on."}
+                          </>
+                        ) : workingTrace?.steps.length === 1 ? (
+                          <>
+                            <span className="font-medium">
+                              Question {showWorking + 1}, his working.
+                            </span>{" "}
+                            One note, standing on nothing else.{" "}
+                            {workingTrace.steps[0] === workingTrace.target
+                              ? "Filed exactly where the question was set."
+                              : "Filed on a different concept than the question."}{" "}
+                            {working.fromMarker && "He did not name it; the marker did."}
+                          </>
+                        ) : (
+                          <>
+                            <span className="font-medium">
+                              Question {showWorking + 1}: no working.
+                            </span>{" "}
+                            He cited nothing, because nothing you taught reached this
+                            question. Whatever he wrote, he made up.
+                          </>
+                        )}{" "}
+                        <button
+                          onClick={() => setShowWorking(null)}
+                          className="underline decoration-dotted underline-offset-4 text-muted-foreground transition-colors hover:text-foreground"
+                        >
+                          close
+                        </button>
+                      </p>
+                    )}
+                    {offMapConcepts.length > 0 && (
+                      <p className="mt-3 text-sm text-muted-foreground">
+                        Off the map: {offMapConcepts.join(", ")}.{" "}
+                        {offMapConcepts.length === 1 ? "One thing" : `${offMapConcepts.length} things`}{" "}
+                        you taught that the sealed syllabus had no place for. Enrichment or
+                        drift, and only you know which.
+                      </p>
+                    )}
+                    {dark.length > 0 && (
+                      <p className="mt-3 text-sm text-muted-foreground">
+                        Never taught:{" "}
+                        {dark.map((n, i) => (
+                          <span key={n.id}>
+                            {i > 0 && ", "}
+                            <button
+                              onClick={() => showOnMap(n.id)}
+                              className="underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground"
+                            >
+                              {n.label}
+                            </button>
+                          </span>
+                        ))}
+                        .{" "}
+                        {(() => {
+                          const costly = dark.filter((n) =>
+                            result.questions.some((q) => q.nodeId === n.id)
+                          ).length;
+                          return costly > 0
+                            ? `${costly} of them carried a question.`
+                            : "None of them carried a question this time.";
+                        })()}
+                      </p>
+                    )}
+                  </div>
+                </>
+              )}
 
               <Separator className="my-5" />
 
@@ -1031,6 +1451,7 @@ export default function Home() {
                       ? ledger.find((b) => b.id === g.culpritBeliefId)
                       : undefined;
                   const culpritRoot = culprit ? rootCause(ledger, culprit.id) : undefined;
+                  const onNode = q.nodeId ? syllabus.find((n) => n.id === q.nodeId) : undefined;
                   return (
                     <div
                       key={i}
@@ -1046,6 +1467,39 @@ export default function Home() {
                         <VerdictChip verdict={g.verdict} />
                         <p className="text-sm font-medium">{q.q}</p>
                       </div>
+                      <div className="mt-1 flex flex-wrap items-center gap-x-3">
+                      {onNode && (
+                        <button
+                          onClick={() => showOnMap(onNode.id)}
+                          className="text-xs text-muted-foreground underline decoration-dotted underline-offset-4 transition-colors hover:text-foreground"
+                        >
+                          on the map: {onNode.label}
+                          {/* Only worth flagging on a mark that was lost. A
+                              correct answer on an unlit concept is not a
+                              contradiction (the belief that earned it was filed
+                              under a neighbour), but printing "never lit" next
+                              to CORRECT reads like the app contradicting
+                              itself. */}
+                          {states.get(onNode.id)?.state === "unlit" &&
+                          (g.verdict === "blank" || g.verdict === "wrong")
+                            ? " (never lit)"
+                            : ""}
+                        </button>
+                      )}
+                      {syllabus.length > 0 && (
+                        <button
+                          onClick={() => openWorking(i)}
+                          aria-pressed={showWorking === i}
+                          className={`text-xs underline decoration-dotted underline-offset-4 transition-colors ${
+                            showWorking === i
+                              ? "font-medium text-foreground"
+                              : "text-muted-foreground hover:text-foreground"
+                          }`}
+                        >
+                          {showWorking === i ? "hide his working" : "show his working"}
+                        </button>
+                      )}
+                      </div>
                       {/* A blank is Pip guessing from outside the ledger. Show the
                           guess, but greyed: it is not an answer you earned. */}
                       <p
@@ -1056,6 +1510,17 @@ export default function Home() {
                         {a?.answer ?? "(no answer)"}
                       </p>
                       <p className="mt-1 text-sm text-muted-foreground">{g.explanation}</p>
+                      {/* The grader read that answer and wanted to award it. The
+                          rule took the mark back because nothing in the lesson
+                          earned it. Showing both is the only way anyone can see
+                          that the constraint is code and not a polite request. */}
+                      {g.graderVerdict && (
+                        <p className="mt-2 border-l-2 border-foreground/30 pl-3 text-xs text-muted-foreground animate-in fade-in slide-in-from-left-2 fill-mode-backwards delay-700 duration-400">
+                          The grader marked this{" "}
+                          <span className="line-through">{g.graderVerdict}</span>. Overruled in
+                          code: Pip answered from outside the ledger, so the mark is not yours.
+                        </p>
+                      )}
                       {culprit && (
                         <p className="mt-2 border-l-2 border-destructive/50 pl-3 font-hand text-lg leading-6 text-destructive animate-in fade-in slide-in-from-left-2 fill-mode-backwards delay-700 duration-400">
                           {"✗ "}Traced to your lesson, turn {culprit.turn}:{" "}
@@ -1069,6 +1534,26 @@ export default function Home() {
                           which was itself built on turn {culpritRoot.turn}:{" "}
                           <span className="underline decoration-destructive/40 decoration-wavy underline-offset-4">
                             &ldquo;{culpritRoot.quote}&rdquo;
+                          </span>
+                        </p>
+                      )}
+                      {/* Naming the sentence that cost the mark without saying
+                          what would not have is half a report card. */}
+                      {(culpritRoot ?? culprit)?.correction && (
+                        <p className="mt-2 border-l-2 border-[oklch(0.72_0.13_85)] pl-3 text-sm animate-in fade-in slide-in-from-left-2 fill-mode-backwards delay-1000 duration-400">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                            {/* The advice is aimed at the root, not the nearest
+                                mistake, so two questions poisoned by one
+                                sentence get the same fix. Saying which turn it
+                                belongs to is what stops that reading as a
+                                repeated paragraph. */}
+                            {culprit && culpritRoot && culpritRoot.id !== culprit.id
+                              ? `Say instead, at the root (turn ${culpritRoot.turn})`
+                              : "Say instead"}
+                          </span>
+                          <br />
+                          <span className="font-hand text-lg leading-6">
+                            {(culpritRoot ?? culprit)!.correction}
                           </span>
                         </p>
                       )}
@@ -1104,47 +1589,244 @@ export default function Home() {
   );
 }
 
-// One belief's file, expanded in place under the map. The same sticky-note
-// quote the modal used to carry, just living inside the panel now.
-function BeliefFile({
-  belief,
-  root,
+// One real lesson replaying itself on the enroll screen: the hash tables map
+// that was sealed before that lesson started, lighting up one sentence at a
+// time, ending on the two concepts the teacher got wrong. It is the finished
+// demo running in the background, not a mockup, so the promise on the left is
+// visibly the thing on the right.
+function EnrollDemo() {
+  const [step, setStep] = useState(0);
+  const [loop, setLoop] = useState(0);
+  const [still, setStill] = useState(false);
+
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const sync = () => setStill(mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
+
+  useEffect(() => {
+    if (still) return;
+    const t = setInterval(() => {
+      setStep((s) => {
+        if (s >= SEED_LEDGER.length) {
+          // A fresh mount so the concepts light for the second run too: the
+          // map only flares a node the first time it comes on.
+          setLoop((l) => l + 1);
+          return 0;
+        }
+        return s + 1;
+      });
+    }, 1900);
+    return () => clearInterval(t);
+  }, [still]);
+
+  // Held still, the replay does not play: it shows the finished lesson instead.
+  const shown = still ? SEED_LEDGER : SEED_LEDGER.slice(0, step);
+  const wrong = shown.filter((b) => b.status === "wrong").length;
+
+  return (
+    <div className="hidden lg:block">
+      <div className="h-[440px] overflow-hidden rounded-md border bg-card">
+        <BeliefMap
+          key={loop}
+          syllabus={SEED_SYLLABUS}
+          beliefs={shown}
+          selected={null}
+          onSelect={() => {}}
+          interactive={false}
+          className="h-full w-full"
+        />
+      </div>
+      <p className="mt-3 text-sm text-muted-foreground">
+        A real lesson, replayed. Nine concepts, sealed before the teacher spoke.{" "}
+        {step === 0
+          ? "Nothing taught yet, so nothing is lit."
+          : wrong > 0
+            ? `${step} sentences in, and ${wrong} of them planted something false.`
+            : `${step} sentence${step === 1 ? "" : "s"} in.`}
+      </p>
+    </div>
+  );
+}
+
+// How long Pip has been in this lesson. He has no clock; the room does.
+function LessonClock({ since }: { since: number }) {
+  // Read the clock during the first render, not in an effect: a session
+  // restored from storage started long ago, and an effect would show 00:00 for
+  // a second before jumping to the real elapsed time.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const t = setInterval(() => setNow(Date.now()), 1000);
+    return () => clearInterval(t);
+  }, []);
+  const secs = Math.max(0, Math.floor((now - since) / 1000));
+  return (
+    <span className="font-mono text-xs tabular-nums text-muted-foreground">
+      {String(Math.floor(secs / 60)).padStart(2, "0")}:{String(secs % 60).padStart(2, "0")}
+    </span>
+  );
+}
+
+// The map before the examiner has finished drawing it. Not a spinner: the shape
+// of what is coming, so the wait tells you what to expect.
+function MapSkeleton() {
+  return (
+    <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6">
+      {[0, 1, 2].map((row) => (
+        <div key={row} className="flex gap-3">
+          {Array.from({ length: row === 1 ? 3 : 2 }).map((_, i) => (
+            <Skeleton
+              key={i}
+              className="h-10 w-32 rounded-md"
+              style={{ animationDelay: `${(row * 3 + i) * 90}ms` }}
+            />
+          ))}
+        </div>
+      ))}
+      <p className="mt-2 text-center text-xs text-muted-foreground">
+        The examiner is drawing the subject and sealing a paper against it.
+      </p>
+    </div>
+  );
+}
+
+// One concept's file, expanded in place under the map: what the subject says it
+// is, and everything Pip believes about it, in whose words. A concept nobody
+// taught has a file too, and it is empty, which is the whole point.
+function ConceptFile({
+  concept,
+  beliefs,
+  ledger,
   onReveal,
   onClose,
+  arguing,
+  objection,
+  busy,
+  onArgue,
+  onObjection,
+  onSubmit,
 }: {
-  belief: Belief;
-  root: Belief | undefined;
-  onReveal: () => void;
+  concept: SyllabusNode | undefined;
+  beliefs: Belief[];
+  ledger: Belief[];
+  onReveal: (b: Belief) => void;
   onClose: () => void;
+  arguing: number | null;
+  objection: string;
+  busy: boolean;
+  onArgue: (id: number) => void;
+  onObjection: (v: string) => void;
+  onSubmit: (b: Belief) => void;
 }) {
+  const title = concept?.label ?? beliefs[0]?.concept ?? "";
   return (
-    <div className="mt-3 border-t pt-3 animate-in fade-in slide-in-from-bottom-1 duration-200">
+    <div className="mt-3 rounded-md border bg-card p-3 animate-in fade-in slide-in-from-bottom-1 duration-200">
       <div className="flex items-center gap-2">
-        <BeliefStatusChip status={belief.status} />
-        <span className="min-w-0 flex-1 truncate text-sm font-semibold">{belief.concept}</span>
+        {beliefs.length > 0 ? (
+          <BeliefStatusChip status={worstOf(beliefs)} />
+        ) : (
+          <span className="inline-block shrink-0 rounded-[3px] border border-dashed border-muted-foreground/50 px-1.5 py-0.5 text-[11px] font-semibold uppercase tracking-widest text-muted-foreground">
+            never taught
+          </span>
+        )}
+        <span className="min-w-0 flex-1 truncate text-sm font-semibold">{title}</span>
         <button
           onClick={onClose}
-          aria-label="fold the belief back up"
+          aria-label="fold the concept back up"
           className="px-1 text-muted-foreground transition-colors hover:text-foreground"
         >
           {"×"}
         </button>
       </div>
-      <p className="mt-2 font-hand text-lg leading-6">{belief.statement}</p>
-      <QuoteSticky turn={belief.turn} quote={belief.quote} />
-      {belief.status !== "correct" && belief.note && (
-        <p className="mt-2 text-xs text-destructive">{belief.note}</p>
+      {concept?.detail && (
+        <p className="mt-2 text-xs italic text-muted-foreground">{concept.detail}</p>
       )}
-      {root && root.id !== belief.id && (
-        <p className="mt-2 border-l-2 border-destructive/40 pl-2 text-xs text-destructive">
-          built on a shakier belief, turn {root.turn}: &ldquo;{root.quote}&rdquo;
+      {beliefs.length === 0 ? (
+        <p className="mt-2 text-sm text-muted-foreground">
+          Nothing in the notebook. Pip cannot answer a question about this, and
+          guessing one right earns nothing.
         </p>
+      ) : (
+        beliefs.map((b) => {
+          const root = rootCause(ledger, b.id);
+          return (
+            <div key={b.id} className="mt-3 border-t pt-3 first:border-t-0 first:pt-0">
+              <p className="font-hand text-lg leading-6">{b.statement}</p>
+              {b.disputed && (
+                <p className="text-[11px] uppercase tracking-wide text-muted-foreground">
+                  rewritten after you challenged it
+                </p>
+              )}
+              <QuoteSticky turn={b.turn} quote={b.quote} />
+              {b.status !== "correct" && b.note && (
+                <p className="mt-2 text-xs text-destructive">{b.note}</p>
+              )}
+              {root && root.id !== b.id && (
+                <p className="mt-2 border-l-2 border-destructive/40 pl-2 text-xs text-destructive">
+                  built on a shakier belief, turn {root.turn}: &ldquo;{root.quote}&rdquo;
+                </p>
+              )}
+              {b.correction && (
+                <p className="mt-2 border-l-2 border-[oklch(0.72_0.13_85)] pl-2 text-xs">
+                  <span className="font-semibold uppercase tracking-wide text-muted-foreground">
+                    Say instead
+                  </span>
+                  <br />
+                  <span className="font-hand text-base leading-5">{b.correction}</span>
+                </p>
+              )}
+              <div className="mt-3 flex flex-wrap gap-2">
+                <Button variant="outline" size="sm" onClick={() => onReveal(b)}>
+                  See it in the lesson
+                </Button>
+                <Button
+                  variant={arguing === b.id ? "secondary" : "ghost"}
+                  size="sm"
+                  onClick={() => onArgue(b.id)}
+                >
+                  I never said that
+                </Button>
+              </div>
+              {arguing === b.id && (
+                <div className="mt-2 animate-in fade-in slide-in-from-top-1 duration-200">
+                  <Textarea
+                    value={objection}
+                    onChange={(e) => onObjection(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter" && !e.shiftKey) {
+                        e.preventDefault();
+                        onSubmit(b);
+                      }
+                    }}
+                    placeholder="What did he get wrong about your sentence?"
+                    className="min-h-16 bg-background text-sm"
+                  />
+                  <div className="mt-2 flex items-center gap-2">
+                    <Button size="sm" disabled={!objection.trim() || busy} onClick={() => onSubmit(b)}>
+                      {busy ? "he's reading it back…" : "Put it to Pip"}
+                    </Button>
+                    <span className="text-[11px] text-muted-foreground">
+                      He only backs down if your words really don&rsquo;t say it.
+                    </span>
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })
       )}
-      <Button variant="outline" size="sm" className="mt-3" onClick={onReveal}>
-        See it in the lesson
-      </Button>
     </div>
   );
+}
+
+// A concept is only as sound as the worst thing believed about it.
+function worstOf(beliefs: Belief[]): Belief["status"] {
+  if (beliefs.some((b) => b.status === "wrong")) return "wrong";
+  if (beliefs.some((b) => b.status === "fuzzy")) return "fuzzy";
+  return "correct";
 }
 
 function BeliefStatusChip({ status }: { status: Belief["status"] }) {
@@ -1259,6 +1941,11 @@ function BeliefNote({
             {root && root.id !== belief.id && (
               <p className="font-hand text-[15px] text-destructive/80">
                 built on turn {root.turn}: &ldquo;{root.quote}&rdquo;
+              </p>
+            )}
+            {belief.correction && (
+              <p className="font-hand text-[15px] text-[oklch(0.5_0.11_80)]">
+                say instead: {belief.correction}
               </p>
             )}
             <button

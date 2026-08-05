@@ -172,6 +172,62 @@
   transform-origin: center;
 }
 
+/* React Flow, dressed for the classroom. Its own custom properties do this,
+   so none of the library's internals get overridden by hand. */
+.sp-map {
+  --xy-background-color: transparent;
+  --xy-controls-button-background-color: var(--color-card);
+  --xy-controls-button-background-color-hover: var(--color-secondary);
+  --xy-controls-button-color: var(--color-foreground);
+  --xy-controls-button-color-hover: var(--color-foreground);
+  --xy-controls-button-border-color: var(--color-border);
+  --xy-minimap-background-color: var(--color-card);
+  --xy-edge-label-background-color: var(--color-card);
+}
+.sp-map .react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+}
+/* React Flow asks free users to leave its credit in place, so it stays. It just
+   sits down out of the way instead of over the bottom row of concepts. */
+.sp-map .react-flow__attribution {
+  background: transparent;
+  font-size: 9px;
+}
+.sp-map .react-flow__attribution a {
+  color: var(--color-muted-foreground);
+  opacity: 0.55;
+}
+
+.sp-node {
+  box-shadow: 0 1px 2px oklch(0.26 0.015 70 / 0.07);
+}
+.sp-node-selected {
+  outline: 2px solid var(--color-foreground);
+  outline-offset: 2px;
+}
+
+/* A concept coming on. The ring is currentColor, which the node sets to its own
+   ink, so a misconception lighting up flares red and never gold. */
+@keyframes sp-node-lit {
+  0% {
+    box-shadow: 0 0 0 0 currentColor;
+    transform: scale(1);
+  }
+  45% {
+    transform: scale(1.07);
+  }
+  100% {
+    box-shadow: 0 0 0 15px transparent;
+    transform: scale(1);
+  }
+}
+.sp-node-lit {
+  animation: sp-node-lit 900ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
 /* Pip's idle life and reactions. Blinking is not here: it is a face swap in
    pip-face.tsx, because Open Peeps eyes are filled shapes and squashing them
    with scaleY smears the pupils. */
@@ -258,7 +314,9 @@
   .pip-steam,
   .pip-scribble,
   .pip-pop,
-  .pip-think {
+  .pip-think,
+  .sp-node-lit,
+  .sp-clock {
     animation: none;
   }
 }
