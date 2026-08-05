@@ -230,6 +230,27 @@ Return JSON: {"ops": [{"op", "id", "concept", "statement", "status", "quote", "n
 // the topic. Everything the map draws comes from here.
 export type ConceptState = "unlit" | "correct" | "fuzzy" | "wrong";
 
+// What the teacher is allowed to see of the map while teaching: what they have
+// already lit, plus whatever is immediately teachable next. Not the rest.
+//
+// Handing over the whole syllabus turns the lesson into a checklist, and a
+// checklist is the one thing this app must not be. The point is that you find
+// out what you skipped from the exam, not from a to-do list. So the map shows
+// the frontier: the concepts with nothing left standing in front of them. Teach
+// one and the next ones surface behind it. The full map is only revealed on the
+// report card, where it is the payoff rather than a spoiler.
+export function frontierOf(
+  syllabus: SyllabusNode[],
+  states: Map<string, { state: ConceptState }>
+): Set<string> {
+  const lit = (id: string) => (states.get(id)?.state ?? "unlit") !== "unlit";
+  const open = new Set<string>();
+  for (const n of syllabus) {
+    if (lit(n.id) || n.requires.every(lit)) open.add(n.id);
+  }
+  return open;
+}
+
 export function conceptStates(
   syllabus: SyllabusNode[],
   ledger: Belief[]

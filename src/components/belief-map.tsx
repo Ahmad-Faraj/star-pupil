@@ -4,10 +4,13 @@
 //
 // What changed the map from a log into a map: the nodes are the SUBJECT's
 // concepts, written by the examiner at enrollment, not the concepts the teacher
-// happened to mention. So the map opens full of unlit nodes — the shape of what
-// you have to teach, before you have taught any of it — and teaching lights them
-// gold, red or fuzzy. A log can only show you what you covered. This shows you
-// what you skipped, which is the half that costs marks.
+// happened to mention. Teaching lights them gold, red or fuzzy.
+//
+// It shows the frontier, never the whole syllabus. Handing the teacher the full
+// list turns the lesson into a checklist, and then the exam is only measuring
+// how well they worked through a to-do list. So an unlit concept is only drawn
+// once everything it stands on is taught: teach one and the next ones surface
+// behind it. `revealAll` opens the rest, and only the report card sets it.
 //
 // Two kinds of edge, and they mean different things. A dashed edge is the
 // subject's own order: this concept needs that one first. A solid edge is Pip
@@ -34,7 +37,7 @@ import {
 } from "@xyflow/react";
 import dagre from "@dagrejs/dagre";
 import "@xyflow/react/dist/style.css";
-import { Belief, ConceptState, SyllabusNode, conceptStates } from "@/lib/student";
+import { Belief, ConceptState, SyllabusNode, conceptStates, frontierOf } from "@/lib/student";
 
 // A map key addresses whatever a node stands for: a syllabus concept by its
 // slug, or a single off-syllabus belief. The page selects by this, so the chat
@@ -75,6 +78,9 @@ interface ConceptData extends Record<string, unknown> {
   fresh: boolean; // lit since the last render pass, so it can flare
   step: number; // 1-based position in the working, 0 when not on the path
   target: boolean; // the concept the question was set on
+  // Mid-lesson an unlit concept is one you could teach next. On the report card
+  // the same node means one you never reached. Same colour, opposite news.
+  revealAll: boolean;
 }
 
 type ConceptNode = Node<ConceptData, "concept">;
@@ -135,7 +141,9 @@ function ConceptNodeView({ data }: NodeProps<ConceptNode>) {
                 : state === "unlit"
                   ? data.marks > 0
                     ? `never taught · ${data.marks} mark${data.marks === 1 ? "" : "s"}`
-                    : "never taught"
+                    : data.revealAll
+                      ? "never taught"
+                      : "open next"
                   : `${data.count} belief${data.count === 1 ? "" : "s"}`}
         </span>
       </span>
@@ -196,6 +204,7 @@ function Canvas({
   selected,
   onSelect,
   revealMarks,
+  revealAll,
   questionNodeIds,
   trace,
   interactive = true,
@@ -205,6 +214,7 @@ function Canvas({
   selected: string | null;
   onSelect: (key: string | null) => void;
   revealMarks: boolean;
+  revealAll: boolean;
   questionNodeIds: string[];
   trace: Trace | null;
   interactive?: boolean;
@@ -218,6 +228,14 @@ function Canvas({
   const [justLit, setJustLit] = useState<Set<string>>(new Set());
 
   const states = useMemo(() => conceptStates(syllabus, beliefs), [syllabus, beliefs]);
+  // Mid-lesson the map draws the frontier only. On the report card it draws
+  // everything, including what was never reached, which is the whole point of
+  // the report card.
+  const shown = useMemo(() => {
+    if (revealAll) return syllabus;
+    const open = frontierOf(syllabus, states);
+    return syllabus.filter((n) => open.has(n.id));
+  }, [syllabus, states, revealAll]);
   const offMap = useMemo(() => beliefs.filter((b) => !b.nodeId || !states.has(b.nodeId)), [beliefs, states]);
 
   const marksPerNode = useMemo(() => {
@@ -227,7 +245,7 @@ function Canvas({
   }, [questionNodeIds]);
 
   const { nodes, edges } = useMemo(() => {
-    const raw: ConceptNode[] = syllabus.map((n) => {
+    const raw: ConceptNode[] = shown.map((n) => {
       const entry = states.get(n.id)!;
       return {
         id: n.id,
@@ -245,6 +263,7 @@ function Canvas({
           fresh: justLit.has(n.id),
           step: 0,
           target: false,
+          revealAll,
         },
       };
     });
@@ -265,13 +284,14 @@ function Canvas({
           fresh: justLit.has(offMapKey(b.id)),
           step: 0,
           target: false,
+          revealAll,
         },
       });
     }
 
     const keys = new Set(raw.map((n) => n.id));
     const edges: Edge[] = [];
-    for (const n of syllabus) {
+    for (const n of shown) {
       for (const req of n.requires) {
         if (!keys.has(req)) continue;
         edges.push({
@@ -324,7 +344,7 @@ function Canvas({
       }
     }
     return { nodes: layout(raw, edges), edges };
-  }, [syllabus, beliefs, states, offMap, marksPerNode, revealMarks, justLit]);
+  }, [shown, beliefs, states, offMap, marksPerNode, revealMarks, revealAll, justLit]);
 
   useEffect(() => {
     const fresh = nodes
@@ -499,6 +519,7 @@ export function BeliefMap(props: {
   selected: string | null;
   onSelect: (key: string | null) => void;
   revealMarks?: boolean;
+  revealAll?: boolean;
   questionNodeIds?: string[];
   trace?: Trace | null;
   interactive?: boolean;
@@ -507,6 +528,7 @@ export function BeliefMap(props: {
   const {
     className,
     revealMarks = false,
+    revealAll = false,
     questionNodeIds = [],
     trace = null,
     interactive = true,
@@ -515,8 +537,8 @@ export function BeliefMap(props: {
   if (!props.syllabus.length && !props.beliefs.length) {
     return (
       <p className={`m-auto max-w-[32ch] p-6 text-center text-sm text-muted-foreground ${className ?? ""}`}>
-        The examiner is still sketching the subject. In a moment this fills with
-        every concept a fair lesson covers, all of them dark.
+        The examiner is still sketching the subject. In a moment this shows you
+        where a lesson starts, and nothing further.
       </p>
     );
   }
@@ -526,6 +548,7 @@ export function BeliefMap(props: {
         <Canvas
           {...rest}
           revealMarks={revealMarks}
+          revealAll={revealAll}
           questionNodeIds={questionNodeIds}
           trace={trace}
           interactive={interactive}
@@ -535,9 +558,19 @@ export function BeliefMap(props: {
   );
 }
 
-export function MapLegend({ lit, total }: { lit: number; total: number }) {
+export function MapLegend({
+  lit,
+  total,
+  next,
+  revealAll,
+}: {
+  lit: number;
+  total: number;
+  next?: number;
+  revealAll?: boolean;
+}) {
   return (
-    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px] text-muted-foreground">
+    <div className="flex h-4 flex-wrap items-center gap-x-3 gap-y-1 overflow-hidden text-[10px] text-muted-foreground">
       <span className="flex items-center gap-1">
         <span className="h-2 w-2 rounded-full" style={{ background: STATE_COLOR.correct }} />
         right
@@ -555,11 +588,13 @@ export function MapLegend({ lit, total }: { lit: number; total: number }) {
       </span>
       <span className="flex items-center gap-1">
         <span className="h-2 w-2 rounded-full border border-dashed border-muted-foreground/60" />
-        never taught
+        {revealAll ? "never taught" : "open next"}
       </span>
       {total > 0 && (
+        // Mid-lesson this must never print the total. The number of concepts
+        // left is exactly the spoiler the frontier exists to withhold.
         <span className="ml-auto tabular-nums">
-          {lit} of {total} lit
+          {revealAll ? `${lit} of ${total} lit` : `${lit} lit · ${next ?? 0} open next`}
         </span>
       )}
     </div>

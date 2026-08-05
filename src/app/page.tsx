@@ -17,7 +17,6 @@ import { Textarea } from "@/components/ui/textarea";
 import { Separator } from "@/components/ui/separator";
 import { Skeleton } from "@/components/ui/skeleton";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Progress, ProgressLabel, ProgressValue } from "@/components/ui/progress";
 import {
   Belief,
   ChatTurn,
@@ -28,6 +27,7 @@ import {
   PupilReply,
   SyllabusNode,
   conceptStates,
+  frontierOf,
   rootCause,
 } from "@/lib/student";
 import { BeliefMap, MapLegend, Trace, keyOfBelief } from "@/components/belief-map";
@@ -626,6 +626,12 @@ export default function Home() {
   const states = conceptStates(syllabus, ledger);
   const lit = Array.from(states.values()).filter((s) => s.state !== "unlit").length;
   const dark = syllabus.filter((n) => states.get(n.id)?.state === "unlit");
+  // Concepts sitting open on the frontier: unlit, but everything they stand on
+  // is taught. This is the only count the lesson screen may show, because the
+  // number of concepts remaining is the spoiler.
+  const openNext = Array.from(frontierOf(syllabus, states)).filter(
+    (id) => states.get(id)?.state === "unlit"
+  ).length;
   const openBeliefs = selected ? ledger.filter((b) => keyOfBelief(b) === selected) : [];
   const openConcept = selected ? syllabus.find((n) => n.id === selected) : undefined;
   // Things taught that the sealed map had no place for. Concept-map assessment
@@ -732,7 +738,9 @@ export default function Home() {
             {phase === "lesson" ? (
               <>
                 <LessonClock since={startedAt} />
-                <span className="hidden sm:inline">
+                {/* Right-aligned and its text changes as Pip writes, so without
+                    a reserved width the clock next to it slides sideways. */}
+                <span className="hidden text-right sm:inline sm:min-w-[15rem]">
                   teaching <span className="text-foreground">{topic}</span>
                   {" · "}
                   {writingNotes > 0 ? "Pip is writing…" : beliefCount}
@@ -753,7 +761,10 @@ export default function Home() {
 
       <main className="mx-auto max-w-7xl px-6 py-8">
         {phase === "enroll" && (
-          <section className="grid items-center gap-10 animate-in fade-in slide-in-from-bottom-2 duration-500 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+          // items-start, never items-center: a centred row re-centres every
+          // time the right-hand column changes height, which drags the headline
+          // and the input up and down while the replay plays.
+          <section className="grid items-start gap-10 animate-in fade-in slide-in-from-bottom-2 duration-500 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
             <div className="mx-auto w-full max-w-xl">
             <PipDesk mood="listening" className="w-56 text-foreground" />
             <h1 className="mt-4 text-3xl font-semibold tracking-tight">
@@ -761,10 +772,10 @@ export default function Home() {
             </h1>
             <p className="mt-3 text-muted-foreground">
               Pip knows nothing. Every sentence you say becomes a belief in his
-              head, sloppy ones included. Before you start, the examiner draws
-              the whole subject as a map and seals a paper against it. You teach
-              in the dark parts. Whatever is still dark at the end is a mark he
-              cannot earn.
+              head, sloppy ones included. The examiner maps the subject and
+              seals a paper against it before you start, but you never see the
+              map. You see the next thing you could teach, and nothing past it.
+              What you never reached turns up on the report card.
             </p>
             <div className="mt-8 flex gap-2">
               <Input
@@ -804,10 +815,14 @@ export default function Home() {
           </section>
         )}
 
+        {/* The lesson is a room, not a document: it fits the window and never
+            scrolls the page. Both columns are flex so the chat and the map
+            absorb whatever height is left over, and the composer, the paper and
+            the exam button stay put at the bottom where the hand expects them. */}
         {phase === "lesson" && (
-          <section className="grid items-start gap-6 animate-in fade-in slide-in-from-bottom-2 duration-500 lg:grid-cols-[minmax(0,1fr)_minmax(400px,460px)]">
-            <div>
-              <div className="flex items-center gap-2">
+          <section className="grid gap-6 animate-in fade-in slide-in-from-bottom-2 duration-500 lg:h-[calc(100vh-9rem)] lg:min-h-[540px] lg:grid-cols-[minmax(0,1fr)_minmax(400px,460px)]">
+            <div className="flex min-h-0 flex-col">
+              <div className="flex shrink-0 items-center gap-2">
                 <PipFace mood={deskMood} frozen className="h-7 w-7 text-foreground" />
                 <h2 className="text-lg font-semibold tracking-tight">
                   Teaching Pip: {topic}
@@ -820,7 +835,7 @@ export default function Home() {
                   if (el) stickRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
                 }}
                 aria-live="polite"
-                className="mt-4 flex h-[clamp(420px,60vh,680px)] flex-col gap-3 overflow-y-auto rounded-md border bg-card p-4"
+                className="mt-4 flex min-h-[320px] flex-1 flex-col gap-3 overflow-y-auto rounded-md border bg-card p-4"
               >
                 {transcript.map((t, i) => {
                   const turn = turnOfIndex[i];
@@ -913,7 +928,7 @@ export default function Home() {
                   </p>
                 )}
               </div>
-              <div className="mt-3 flex gap-2">
+              <div className="mt-3 flex shrink-0 gap-2">
                 <Textarea
                   value={draft}
                   onChange={(e) => setDraft(e.target.value)}
@@ -924,13 +939,13 @@ export default function Home() {
                     }
                   }}
                   placeholder="Explain something. Pip believes exactly what you say."
-                  className="min-h-20 bg-card"
+                  className="h-20 min-h-20 bg-card"
                 />
                 <Button onClick={teach} disabled={!draft.trim() || pipThinking}>
                   <PencilLine className="h-4 w-4" aria-hidden /> Teach
                 </Button>
               </div>
-              <div className="mt-3 flex items-center gap-2">
+              <div className="mt-3 flex h-8 shrink-0 items-center gap-2">
                 <Button
                   variant="outline"
                   size="sm"
@@ -962,14 +977,14 @@ export default function Home() {
               </div>
             </div>
 
-            <aside className="lg:sticky lg:top-[72px]">
+            <aside className="flex min-h-0 flex-col">
               <PipDesk
                 mood={deskMood}
                 writing={writingNotes > 0}
-                className="mx-auto w-48 text-foreground"
+                className="mx-auto w-40 shrink-0 text-foreground"
               />
-              <Tabs value={tab} onValueChange={setTab} className="mt-2">
-                <div className="flex items-center gap-2">
+              <Tabs value={tab} onValueChange={setTab} className="mt-2 min-h-0 flex-1">
+                <div className="flex shrink-0 items-center gap-2">
                   <TabsList variant="line">
                     <TabsTrigger value="map">
                       <Waypoints className="h-3.5 w-3.5" aria-hidden /> Map
@@ -1008,46 +1023,39 @@ export default function Home() {
                   )}
                 </div>
 
-                <TabsContent value="map">
-                  <div className="flex h-[520px] flex-col overflow-hidden rounded-md border bg-card">
+                <TabsContent value="map" className="flex min-h-0 flex-col">
+                  {/* The file is an overlay on the map, not another row in the
+                      column. A panel that pushes its siblings down can push the
+                      exam button off the window, and on the way there it slides
+                      under whatever it passes. Nothing below this moves. */}
+                  <div className="relative flex min-h-[200px] flex-1 flex-col overflow-hidden rounded-md border bg-card">
                     {mapPanel}
+                    {(openConcept || openBeliefs.length > 0) && (
+                      <ConceptFile
+                        concept={openConcept}
+                        beliefs={openBeliefs}
+                        ledger={ledger}
+                        onReveal={revealInLesson}
+                        onClose={() => setSelected(null)}
+                        arguing={arguing}
+                        objection={objection}
+                        busy={disputeBusy}
+                        onArgue={(id) => {
+                          setArguing((cur) => (cur === id ? null : id));
+                          setObjection("");
+                        }}
+                        onObjection={setObjection}
+                        onSubmit={dispute}
+                      />
+                    )}
                   </div>
-                  <div className="mt-2">
-                    <MapLegend lit={lit} total={syllabus.length} />
+                  <div className="mt-2 shrink-0">
+                    <MapLegend lit={lit} total={syllabus.length} next={openNext} />
                   </div>
-                  {syllabus.length > 0 && (
-                    <Progress
-                      value={Math.round((lit / syllabus.length) * 100)}
-                      className="mt-3 gap-1"
-                    >
-                      <ProgressLabel className="text-xs text-muted-foreground">
-                        Subject lit
-                      </ProgressLabel>
-                      <ProgressValue className="text-xs" />
-                    </Progress>
-                  )}
-                  {(openConcept || openBeliefs.length > 0) && (
-                    <ConceptFile
-                      concept={openConcept}
-                      beliefs={openBeliefs}
-                      ledger={ledger}
-                      onReveal={revealInLesson}
-                      onClose={() => setSelected(null)}
-                      arguing={arguing}
-                      objection={objection}
-                      busy={disputeBusy}
-                      onArgue={(id) => {
-                        setArguing((cur) => (cur === id ? null : id));
-                        setObjection("");
-                      }}
-                      onObjection={setObjection}
-                      onSubmit={dispute}
-                    />
-                  )}
                 </TabsContent>
 
-                <TabsContent value="log">
-                  <div className="paper-ruled min-h-[520px] rounded-md border pb-2 text-[17px] leading-8">
+                <TabsContent value="log" className="flex min-h-0 flex-col">
+                  <div className="paper-ruled min-h-[220px] flex-1 overflow-y-auto rounded-md border pb-2 text-[17px] leading-8">
                     {ledger.length === 0 && writingNotes === 0 && (
                       <p className="pl-10 pr-3 font-hand text-muted-foreground">
                         Nothing yet. Everything you teach lands on these lines:
@@ -1073,7 +1081,7 @@ export default function Home() {
                 </TabsContent>
               </Tabs>
 
-              <div className="mt-3 flex items-center justify-between gap-2 rounded-md border bg-card py-2 pl-3 pr-2">
+              <div className="mt-3 flex shrink-0 items-center justify-between gap-2 rounded-md border bg-card py-2 pl-3 pr-2">
                 <div className="min-w-0">
                   <p className="text-sm font-semibold tracking-tight">The exam paper</p>
                   <p className="truncate font-mono text-[10px] text-muted-foreground">
@@ -1163,25 +1171,22 @@ export default function Home() {
                 )}
               </div>
               <Button
-                className="mt-3 w-full"
+                className="mt-3 w-full shrink-0"
                 size="lg"
                 disabled={ledger.length < 3 || writingNotes > 0 || paperPending}
                 onClick={sendToExam}
               >
                 Send Pip to the exam
               </Button>
-              {ledger.length < 3 ? (
-                <p className="mt-2 text-center text-xs text-muted-foreground">
-                  Teach at least three things first.
-                </p>
-              ) : (
-                dark.length > 0 && (
-                  <p className="mt-2 text-center text-xs text-muted-foreground">
-                    {dark.length} concept{dark.length === 1 ? "" : "s"} still dark. He can only
-                    answer from what is lit.
-                  </p>
-                )
-              )}
+              {/* Fixed height, always rendered. A line that appears and
+                  disappears under a button moves the button. */}
+              <p className="mt-2 h-8 shrink-0 overflow-hidden text-center text-xs text-muted-foreground">
+                {ledger.length < 3
+                  ? "Teach at least three things first."
+                  : openNext > 0
+                    ? `${openNext} concept${openNext === 1 ? "" : "s"} open next, and more behind them.`
+                    : "He can only answer from what you lit."}
+              </p>
             </aside>
           </section>
         )}
@@ -1354,14 +1359,18 @@ export default function Home() {
                           setSelected(k);
                         }}
                         revealMarks
+                        revealAll
                         trace={workingTrace}
                         questionNodeIds={result.questions.flatMap((q) => (q.nodeId ? [q.nodeId] : []))}
                         className="h-full w-full"
                       />
                     </div>
-                    <MapLegend lit={lit} total={syllabus.length} />
+                    <MapLegend lit={lit} total={syllabus.length} revealAll />
                     {showWorking != null && result && (
-                      <p className="mt-3 text-sm animate-in fade-in duration-200">
+                      // Three lines reserved: the caption differs per question
+                      // and the questions below it must not jump as you click
+                      // from one working to the next.
+                      <p className="mt-3 min-h-[4.5rem] text-sm animate-in fade-in duration-200">
                         {workingTrace && workingTrace.steps.length > 1 ? (
                           <>
                             <span className="font-medium">
@@ -1537,6 +1546,17 @@ export default function Home() {
                           </span>
                         </p>
                       )}
+                      {/* A mark can be lost to a sentence that was perfectly
+                          true and simply stopped early. There is no better
+                          wording to offer for that, and inventing one would be
+                          scolding the teacher for something they got right, so
+                          it says what actually went wrong instead. */}
+                      {culprit && !(culpritRoot ?? culprit).correction && (
+                        <p className="mt-2 border-l-2 border-muted-foreground/40 pl-3 text-sm text-muted-foreground animate-in fade-in slide-in-from-left-2 fill-mode-backwards delay-1000 duration-400">
+                          Nothing in that sentence was wrong. It just stopped
+                          before the part this question asked about.
+                        </p>
+                      )}
                       {/* Naming the sentence that cost the mark without saying
                           what would not have is half a report card. */}
                       {(culpritRoot ?? culprit)?.correction && (
@@ -1640,13 +1660,16 @@ function EnrollDemo() {
           className="h-full w-full"
         />
       </div>
-      <p className="mt-3 text-sm text-muted-foreground">
-        A real lesson, replayed. Nine concepts, sealed before the teacher spoke.{" "}
-        {step === 0
-          ? "Nothing taught yet, so nothing is lit."
+      {/* Fixed height. The sentence changes every two seconds and its length
+          changes with it, so a paragraph that sizes to its text would reflow on
+          a loop and push everything under it up and down forever. */}
+      <p className="mt-3 h-10 text-sm text-muted-foreground">
+        A real lesson, replayed. The map only shows what is teachable next.{" "}
+        {shown.length === 0
+          ? "Nothing taught yet, so it starts at the beginning."
           : wrong > 0
-            ? `${step} sentences in, and ${wrong} of them planted something false.`
-            : `${step} sentence${step === 1 ? "" : "s"} in.`}
+            ? `${shown.length} sentences in, and ${wrong} planted something false.`
+            : `${shown.length} sentence${shown.length === 1 ? "" : "s"} in, and more of the subject has opened up.`}
       </p>
     </div>
   );
@@ -1723,7 +1746,7 @@ function ConceptFile({
 }) {
   const title = concept?.label ?? beliefs[0]?.concept ?? "";
   return (
-    <div className="mt-3 rounded-md border bg-card p-3 animate-in fade-in slide-in-from-bottom-1 duration-200">
+    <div className="absolute inset-x-0 bottom-0 max-h-[78%] overflow-y-auto border-t bg-card p-3 shadow-[0_-8px_20px_oklch(0.26_0.015_70_/_0.1)] animate-in fade-in slide-in-from-bottom-2 duration-200">
       <div className="flex items-center gap-2">
         {beliefs.length > 0 ? (
           <BeliefStatusChip status={worstOf(beliefs)} />
@@ -1793,6 +1816,10 @@ function ConceptFile({
               {arguing === b.id && (
                 <div className="mt-2 animate-in fade-in slide-in-from-top-1 duration-200">
                   <Textarea
+                    // The file scrolls inside its panel, so the box can open
+                    // below the fold. Focusing it brings it into view and lets
+                    // the teacher start typing the objection straight away.
+                    autoFocus
                     value={objection}
                     onChange={(e) => onObjection(e.target.value)}
                     onKeyDown={(e) => {
