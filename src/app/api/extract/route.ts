@@ -1,5 +1,5 @@
 import { NextRequest } from "next/server";
-import { Belief, extractBeliefs } from "@/lib/student";
+import { Belief, extractBeliefs, SyllabusNode } from "@/lib/student";
 import { rateLimit } from "@/lib/rate-limit";
 
 export const maxDuration = 120;
@@ -11,11 +11,12 @@ export async function POST(req: NextRequest) {
       { status: 429 }
     );
   }
-  const { topic, ledger, message, turn } = (await req.json()) as {
+  const { topic, ledger, message, turn, syllabus } = (await req.json()) as {
     topic?: string;
     ledger?: Belief[];
     message?: string;
     turn?: number;
+    syllabus?: SyllabusNode[];
   };
   if (!topic || !message?.trim() || typeof turn !== "number") {
     return Response.json(
@@ -24,7 +25,7 @@ export async function POST(req: NextRequest) {
     );
   }
   try {
-    const next = await extractBeliefs(topic, ledger ?? [], message, turn);
+    const next = await extractBeliefs(topic, ledger ?? [], message, turn, syllabus ?? []);
     return Response.json({ ledger: next });
   } catch (err) {
     return Response.json(

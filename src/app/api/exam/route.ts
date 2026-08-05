@@ -34,9 +34,12 @@ export async function POST(req: NextRequest) {
       try {
         send({ kind: "stage", stage: "writing" });
         const questions = paper?.length ? paper : await generateExam(topic, ledger, 6);
-        send({ kind: "stage", stage: "sitting" });
+        send({ kind: "stage", stage: "sitting", questions });
         const answers = await sitExam(topic, ledger, questions);
-        send({ kind: "stage", stage: "grading" });
+        // Pip's script goes out before the red pen touches it. Grading is the
+        // slowest of the three calls, and the teacher spends it reading what
+        // their own lesson made him write, which is the interesting part.
+        send({ kind: "stage", stage: "grading", answers });
         const grades = await gradeExam(topic, ledger, questions, answers);
         send({ kind: "done", questions, answers, grades });
       } catch (err) {
