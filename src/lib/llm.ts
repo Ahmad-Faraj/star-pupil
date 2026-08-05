@@ -5,9 +5,9 @@
 // out of free quota mid-demo degrades to a slower answer instead of an error.
 // gemini-flash-latest and 3.5-flash are unusable here: ~20 free requests/day.
 
-type Provider = "gemini" | "groq";
+export type Provider = "gemini" | "groq";
 
-interface Rung {
+export interface Rung {
   provider: Provider;
   model: string;
 }
@@ -34,6 +34,11 @@ export interface LlmOptions {
   tier?: keyof typeof TIERS;
   // JSON schema for structured output (Gemini responseSchema format)
   responseSchema?: object;
+  // Replaces the tier's ladder for this one call. The app never sets it: a
+  // ladder that cannot step down is a worse app. scripts/leak-eval.ts sets it
+  // to pin one exact model, because "the grader's leniency depends on which
+  // model is grading" is only a measurement if you choose the model.
+  rungs?: Rung[];
 }
 
 interface Attempt {
@@ -105,7 +110,7 @@ async function callGroq(model: string, prompt: string, opts: LlmOptions): Promis
 }
 
 export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Promise<T> {
-  const rungs = TIERS[opts.tier ?? "smart"].filter((r) => keyFor(r.provider));
+  const rungs = (opts.rungs ?? TIERS[opts.tier ?? "smart"]).filter((r) => keyFor(r.provider));
   if (!rungs.length) throw new Error("no LLM provider is configured");
 
   // 5xx gets retried with backoff, then drops to the next rung; a throttled model
@@ -120,7 +125,17 @@ export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Pr
     if (dead.has(provider)) continue;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const call = provider === "gemini" ? callGemini : callGroq;
-      const res = await call(model, prompt, opts);
+      // fetch throws rather than returning a response when the connection
+      // itself fails (DNS, reset, headers timeout). Unhandled, that escapes the
+      // ladder entirely and a flaky minute of network looks exactly like an
+      // outage. It is a transport failure, so treat it as a 5xx: retry, then
+      // step down.
+      let res: Attempt;
+      try {
+        res = await call(model, prompt, opts);
+      } catch (e) {
+        res = { ok: false, detail: e instanceof Error ? e.message : "fetch failed" };
+      }
 
       if (res.ok) {
         try {
