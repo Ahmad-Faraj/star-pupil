@@ -142,7 +142,15 @@ async function callGroq(
 // bounds, not one: a per-attempt timeout so a hang can't eat the budget on its
 // own, and a wall-clock budget on the whole ladder so a bad run always fails
 // fast and clean well inside the route's own maxDuration, rather than racing it.
-const ATTEMPT_TIMEOUT_MS = 20_000;
+//
+// One attempt per step, not several: with a live model outage the thing worth
+// spending budget on is reaching a DIFFERENT model, not asking the same stuck
+// one twice. Measured against this deploy while gemini-3-flash-preview was
+// unhealthy, a single hung attempt at the old 20s timeout was enough on its
+// own to blow the exam route's whole per-call budget before a fallback model
+// ever got a turn. 8s is short enough that a live budget still reaches two or
+// three steps, and generous next to the ~2s a healthy call actually takes.
+const ATTEMPT_TIMEOUT_MS = 8_000;
 const LADDER_BUDGET_MS = 45_000;
 
 interface Step {
@@ -160,12 +168,6 @@ export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Pr
   const steps: Step[] = rungs.flatMap((r) => keysFor(r.provider).map((apiKey) => ({ ...r, apiKey })));
   if (!steps.length) throw new Error("no LLM provider is configured");
 
-  // 5xx gets retried with backoff, then drops to the next step; a throttled key
-  // (429) drops immediately instead of waiting out the quota window. A 4xx is
-  // our own request being wrong for that provider, so it skips every remaining
-  // step on that provider rather than repeating the same mistake on a sibling
-  // model or key.
-  const maxAttempts = 2;
   const ladderBudgetMs = opts.ladderBudgetMs ?? LADDER_BUDGET_MS;
   let lastError = "";
   const dead = new Set<Provider>();
@@ -173,52 +175,44 @@ export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Pr
 
   for (const { provider, model, apiKey } of steps) {
     if (dead.has(provider)) continue;
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      const remaining = ladderBudgetMs - (Date.now() - startedAt);
-      if (remaining <= 0) {
-        lastError = lastError || "ran out of time before any rung answered";
-        break;
-      }
-      const call = provider === "gemini" ? callGemini : callGroq;
-      const timeoutMs = Math.min(ATTEMPT_TIMEOUT_MS, remaining);
-      // fetch throws rather than returning a response when the connection
-      // itself fails (DNS, reset, headers timeout, or our own abort). Unhandled,
-      // that escapes the ladder entirely and a flaky minute of network looks
-      // exactly like an outage. It is a transport failure, so treat it as a
-      // 5xx: retry, then step down.
-      let res: Attempt;
-      try {
-        res = await call(model, prompt, opts, apiKey, AbortSignal.timeout(timeoutMs));
-      } catch (e) {
-        const timedOut = e instanceof Error && e.name === "TimeoutError";
-        res = {
-          ok: false,
-          detail: timedOut ? `no response in ${timeoutMs}ms` : e instanceof Error ? e.message : "fetch failed",
-        };
-      }
-
-      if (res.ok) {
-        try {
-          return JSON.parse(res.text!) as T;
-        } catch {
-          // Unparseable JSON is a model blip, not a caller error, so treat it
-          // like a 5xx and keep climbing down rather than aborting.
-          lastError = `unparseable JSON from ${model}`;
-        }
-      } else {
-        lastError = `${res.status ?? "?"} on ${model}: ${res.detail}`;
-        if (res.status === 429) break; // throttled, try the next key or model
-        if (res.status && res.status < 500) {
-          dead.add(provider);
-          break;
-        }
-      }
-
-      if (attempt === maxAttempts) break;
-      const backoff = Math.min(800 * 2 ** (attempt - 1), ladderBudgetMs - (Date.now() - startedAt));
-      if (backoff > 0) await new Promise((r) => setTimeout(r, backoff));
+    const remaining = ladderBudgetMs - (Date.now() - startedAt);
+    if (remaining <= 0) {
+      lastError = lastError || "ran out of time before any rung answered";
+      break;
     }
-    if (Date.now() - startedAt >= ladderBudgetMs) break;
+    const call = provider === "gemini" ? callGemini : callGroq;
+    const timeoutMs = Math.min(ATTEMPT_TIMEOUT_MS, remaining);
+    // fetch throws rather than returning a response when the connection
+    // itself fails (DNS, reset, headers timeout, or our own abort). Unhandled,
+    // that escapes the ladder entirely and a flaky minute of network looks
+    // exactly like an outage. It is a transport failure, so treat it the same
+    // as any other failed step: move on to the next one.
+    let res: Attempt;
+    try {
+      res = await call(model, prompt, opts, apiKey, AbortSignal.timeout(timeoutMs));
+    } catch (e) {
+      const timedOut = e instanceof Error && e.name === "TimeoutError";
+      res = {
+        ok: false,
+        detail: timedOut ? `no response in ${timeoutMs}ms` : e instanceof Error ? e.message : "fetch failed",
+      };
+    }
+
+    if (res.ok) {
+      try {
+        return JSON.parse(res.text!) as T;
+      } catch {
+        // Unparseable JSON is a model blip, not a caller error, so treat it
+        // like any other failed step and keep climbing down.
+        lastError = `unparseable JSON from ${model}`;
+      }
+    } else {
+      lastError = `${res.status ?? "?"} on ${model}: ${res.detail}`;
+      // A 4xx other than 429 is our own request being wrong for this
+      // provider, so every remaining step on it would repeat the same
+      // mistake; skip straight to the other provider's steps.
+      if (res.status && res.status < 500 && res.status !== 429) dead.add(provider);
+    }
   }
 
   console.error("llm: every rung failed:", lastError);

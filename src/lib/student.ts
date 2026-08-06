@@ -559,7 +559,7 @@ Return JSON: {"questions": [{"q", "lookingFor"}]}`;
     temperature: 0.7,
     tier: "smart",
     responseSchema: EXAM_SCHEMA,
-    ladderBudgetMs: 15_000,
+    ladderBudgetMs: 18_000,
   });
   return (questions ?? []).slice(0, count);
 }
@@ -731,7 +731,7 @@ Return JSON: {"answers": [{"answer", "usedBeliefIds", "confessed"}]} in question
     tier: "smart",
     responseSchema: SIT_SCHEMA,
     rungs,
-    ladderBudgetMs: 15_000,
+    ladderBudgetMs: 18_000,
   });
   return answers ?? [];
 }
@@ -808,7 +808,7 @@ Return JSON: {"grades": [{"verdict", "explanation", "culpritBeliefId"}]} in orde
     tier: "smart",
     responseSchema: GRADE_SCHEMA,
     rungs,
-    ladderBudgetMs: 15_000,
+    ladderBudgetMs: 18_000,
   });
   // The one rule the grader is not allowed to break. Asked politely, Gemini marks
   // a confessed gap blank and Groq hands it full marks for a guess it made from
