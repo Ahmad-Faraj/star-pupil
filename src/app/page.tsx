@@ -705,10 +705,16 @@ export default function Home() {
         ? "tired"
         : beliefMood;
 
-  const mapPanel =
-    paperPending && !syllabus.length ? (
-      <MapSkeleton />
-    ) : (
+  // The map and the sealed paper both land in that one /api/paper response, so
+  // until it resolves there is nothing to teach against yet: the frontier the
+  // teacher would be writing into does not exist. Locking the box rather than
+  // just leaving it be keeps a fast typist from firing off a line that lands a
+  // half-second before the map does.
+  const mapPending = paperPending && !syllabus.length;
+
+  const mapPanel = mapPending ? (
+    <MapSketch />
+  ) : (
       <BeliefMap
         syllabus={syllabus}
         beliefs={ledger}
@@ -938,10 +944,15 @@ export default function Home() {
                       teach();
                     }
                   }}
-                  placeholder="Explain something. Pip believes exactly what you say."
+                  disabled={mapPending}
+                  placeholder={
+                    mapPending
+                      ? "The examiner is still sealing the paper…"
+                      : "Explain something. Pip believes exactly what you say."
+                  }
                   className="h-20 min-h-20 bg-card"
                 />
-                <Button onClick={teach} disabled={!draft.trim() || pipThinking}>
+                <Button onClick={teach} disabled={mapPending || !draft.trim() || pipThinking}>
                   <PencilLine className="h-4 w-4" aria-hidden /> Teach
                 </Button>
               </div>
@@ -949,7 +960,7 @@ export default function Home() {
                 <Button
                   variant="outline"
                   size="sm"
-                  disabled={ledger.length === 0}
+                  disabled={mapPending || ledger.length === 0}
                   onClick={() => setShowCheckin((s) => !s)}
                 >
                   Check understanding
@@ -1695,20 +1706,60 @@ function LessonClock({ since }: { since: number }) {
 
 // The map before the examiner has finished drawing it. Not a spinner: the shape
 // of what is coming, so the wait tells you what to expect.
-function MapSkeleton() {
+// While the examiner writes the syllabus and seals a paper against it, there
+// is no real map to draw yet: it lands in one JSON response, not a stream of
+// concepts. So this fakes the shape of the thing arriving - a small tree that
+// sketches itself in, waits, and erases to sketch again - rather than a
+// content-free shimmer bar. It never shows the real subject; revealing that
+// before teaching starts is exactly what the frontier is built to prevent.
+const SKETCH_NODES: { id: string; x: number; y: number; delay: number }[] = [
+  { id: "a", x: 100, y: 18, delay: 0 },
+  { id: "b", x: 52, y: 62, delay: 1.1 },
+  { id: "c", x: 148, y: 62, delay: 1.5 },
+  { id: "d", x: 32, y: 108, delay: 2.9 },
+  { id: "e", x: 168, y: 108, delay: 3.3 },
+];
+const SKETCH_EDGES: { from: string; to: string; delay: number }[] = [
+  { from: "a", to: "b", delay: 0.5 },
+  { from: "a", to: "c", delay: 0.9 },
+  { from: "b", to: "d", delay: 2.3 },
+  { from: "c", to: "e", delay: 2.7 },
+];
+
+function MapSketch() {
+  const byId = new Map(SKETCH_NODES.map((n) => [n.id, n]));
   return (
     <div className="flex h-full w-full flex-col items-center justify-center gap-3 p-6">
-      {[0, 1, 2].map((row) => (
-        <div key={row} className="flex gap-3">
-          {Array.from({ length: row === 1 ? 3 : 2 }).map((_, i) => (
-            <Skeleton
-              key={i}
-              className="h-10 w-32 rounded-md"
-              style={{ animationDelay: `${(row * 3 + i) * 90}ms` }}
+      <svg viewBox="0 0 200 130" className="w-full max-w-[280px] text-muted-foreground" aria-hidden>
+        {SKETCH_EDGES.map((e) => {
+          const from = byId.get(e.from)!;
+          const to = byId.get(e.to)!;
+          return (
+            <line
+              key={`${e.from}-${e.to}`}
+              x1={from.x}
+              y1={from.y + 8}
+              x2={to.x}
+              y2={to.y - 8}
+              pathLength={1}
+              className="sp-sketch-edge"
+              style={{ animationDelay: `${e.delay}s`, stroke: "currentColor" }}
             />
-          ))}
-        </div>
-      ))}
+          );
+        })}
+        {SKETCH_NODES.map((n) => (
+          <rect
+            key={n.id}
+            x={n.x - 23}
+            y={n.y - 8}
+            width={46}
+            height={16}
+            rx={5}
+            className="sp-sketch-node"
+            style={{ animationDelay: `${n.delay}s`, stroke: "currentColor" }}
+          />
+        ))}
+      </svg>
       <p className="mt-2 text-center text-xs text-muted-foreground">
         The examiner is drawing the subject and sealing a paper against it.
       </p>

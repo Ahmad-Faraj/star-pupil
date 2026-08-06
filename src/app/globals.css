@@ -304,6 +304,38 @@
   animation: pip-think 1.6s ease-in-out infinite;
 }
 
+/* The map-loading sketch: a fake little concept tree drawing itself in,
+   holding, then erasing in the same order to draw again. Both rules share one
+   duration so every element's stagger comes from animation-delay alone and
+   they never drift out of phase with each other, loop after loop. */
+@keyframes sp-sketch-node {
+  0% { opacity: 0; transform: scale(0.85); }
+  10% { opacity: 1; transform: scale(1.08); }
+  16% { transform: scale(1); }
+  80% { opacity: 1; }
+  92%, 100% { opacity: 0; }
+}
+.sp-sketch-node {
+  fill: var(--card);
+  stroke-width: 1.25;
+  stroke-dasharray: 3 2;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: sp-sketch-node 6s ease-in-out infinite both;
+}
+@keyframes sp-sketch-edge {
+  0% { opacity: 0; stroke-dashoffset: 1; }
+  6% { opacity: 1; }
+  16% { stroke-dashoffset: 0; }
+  80% { opacity: 1; }
+  92%, 100% { opacity: 0; }
+}
+.sp-sketch-edge {
+  stroke-width: 1.25;
+  stroke-dasharray: 1;
+  animation: sp-sketch-edge 6s ease-in-out infinite both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .pip-head {
     transition: none;
@@ -318,5 +350,11 @@
   .sp-node-lit,
   .sp-clock {
     animation: none;
+  }
+  .sp-sketch-node,
+  .sp-sketch-edge {
+    animation: none;
+    opacity: 1;
+    stroke-dashoffset: 0;
   }
 }

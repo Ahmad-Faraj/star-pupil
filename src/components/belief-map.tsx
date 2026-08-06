@@ -497,8 +497,8 @@ function Canvas({
       nodesDraggable={false}
       nodesConnectable={false}
       elementsSelectable={false}
-      panOnScroll={interactive}
-      zoomOnScroll={false}
+      panOnScroll={false}
+      zoomOnScroll={interactive}
       zoomOnDoubleClick={false}
       panOnDrag={interactive}
       fitView
