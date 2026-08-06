@@ -53,13 +53,21 @@ interface Attempt {
   detail?: string;
 }
 
-const keyFor = (provider: Provider) =>
-  provider === "gemini" ? process.env.GEMINI_API_KEY : process.env.GROQ_API_KEY;
+// Judges hitting the live deploy concurrently share one free-tier quota per
+// key, so a comma-separated list of backup keys is treated as a pool: a 429
+// on one rotates to the next key for the same model before the ladder gives
+// up on that model entirely and steps down to a different one. A single key
+// still works exactly as before - split(",") on one value is just that value.
+function keysFor(provider: Provider): string[] {
+  const raw = provider === "gemini" ? process.env.GEMINI_API_KEY : process.env.GROQ_API_KEY;
+  return (raw ?? "").split(",").map((k) => k.trim()).filter(Boolean);
+}
 
 async function callGemini(
   model: string,
   prompt: string,
   opts: LlmOptions,
+  apiKey: string,
   signal: AbortSignal
 ): Promise<Attempt> {
   const res = await fetch(
@@ -68,7 +76,7 @@ async function callGemini(
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-goog-api-key": keyFor("gemini")!,
+        "X-goog-api-key": apiKey,
       },
       body: JSON.stringify({
         contents: [{ parts: [{ text: prompt }] }],
@@ -100,13 +108,14 @@ async function callGroq(
   model: string,
   prompt: string,
   opts: LlmOptions,
+  apiKey: string,
   signal: AbortSignal
 ): Promise<Attempt> {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${keyFor("groq")!}`,
+      Authorization: `Bearer ${apiKey}`,
     },
     body: JSON.stringify({
       model,
@@ -136,21 +145,33 @@ async function callGroq(
 const ATTEMPT_TIMEOUT_MS = 20_000;
 const LADDER_BUDGET_MS = 45_000;
 
-export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Promise<T> {
-  const rungs = (opts.rungs ?? TIERS[opts.tier ?? "smart"]).filter((r) => keyFor(r.provider));
-  if (!rungs.length) throw new Error("no LLM provider is configured");
+interface Step {
+  provider: Provider;
+  model: string;
+  apiKey: string;
+}
 
-  // 5xx gets retried with backoff, then drops to the next rung; a throttled model
-  // (429) drops immediately instead of waiting out the quota window. A 4xx is our
-  // own request being wrong for that provider, so it skips the provider's
-  // remaining rungs rather than repeating the same mistake on a sibling model.
+export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Promise<T> {
+  const rungs = opts.rungs ?? TIERS[opts.tier ?? "smart"];
+  // Every (model, key) pairing is its own step, keys innermost: a 429 rotates
+  // to a sibling key on the SAME model first (a fresh key is a fresh quota
+  // bucket, so this is usually enough on its own), and only steps down to a
+  // different model once every key for this one is spent.
+  const steps: Step[] = rungs.flatMap((r) => keysFor(r.provider).map((apiKey) => ({ ...r, apiKey })));
+  if (!steps.length) throw new Error("no LLM provider is configured");
+
+  // 5xx gets retried with backoff, then drops to the next step; a throttled key
+  // (429) drops immediately instead of waiting out the quota window. A 4xx is
+  // our own request being wrong for that provider, so it skips every remaining
+  // step on that provider rather than repeating the same mistake on a sibling
+  // model or key.
   const maxAttempts = 2;
   const ladderBudgetMs = opts.ladderBudgetMs ?? LADDER_BUDGET_MS;
   let lastError = "";
   const dead = new Set<Provider>();
   const startedAt = Date.now();
 
-  for (const { provider, model } of rungs) {
+  for (const { provider, model, apiKey } of steps) {
     if (dead.has(provider)) continue;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       const remaining = ladderBudgetMs - (Date.now() - startedAt);
@@ -167,7 +188,7 @@ export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Pr
       // 5xx: retry, then step down.
       let res: Attempt;
       try {
-        res = await call(model, prompt, opts, AbortSignal.timeout(timeoutMs));
+        res = await call(model, prompt, opts, apiKey, AbortSignal.timeout(timeoutMs));
       } catch (e) {
         const timedOut = e instanceof Error && e.name === "TimeoutError";
         res = {
@@ -186,7 +207,7 @@ export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Pr
         }
       } else {
         lastError = `${res.status ?? "?"} on ${model}: ${res.detail}`;
-        if (res.status === 429) break; // throttled, try the next rung
+        if (res.status === 429) break; // throttled, try the next key or model
         if (res.status && res.status < 500) {
           dead.add(provider);
           break;

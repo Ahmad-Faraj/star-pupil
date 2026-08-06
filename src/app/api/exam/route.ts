@@ -2,7 +2,11 @@ import { NextRequest } from "next/server";
 import { Belief, ExamQuestion, generateExam, gradeExam, sitExam } from "@/lib/student";
 import { rateLimit } from "@/lib/rate-limit";
 
-export const maxDuration = 300;
+// Vercel's Hobby plan hard-caps every function at 60s regardless of what a
+// higher value here claims. An exam is three model calls in one invocation, so
+// each is budgeted (see the ladderBudgetMs args in student.ts) to keep their
+// sum safely under this real ceiling.
+export const maxDuration = 60;
 
 export async function POST(req: NextRequest) {
   // An exam is three model calls, so it gets the tightest cap.
