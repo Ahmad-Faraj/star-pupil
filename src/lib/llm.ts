@@ -39,6 +39,11 @@ export interface LlmOptions {
   // to pin one exact model, because "the grader's leniency depends on which
   // model is grading" is only a measurement if you choose the model.
   rungs?: Rung[];
+  // Overrides the default wall-clock budget for this one call. The exam route
+  // makes three of these calls back to back inside one function invocation, so
+  // each gets a tighter budget than a route that only ever makes one, keeping
+  // their sum well inside the route's own maxDuration.
+  ladderBudgetMs?: number;
 }
 
 interface Attempt {
@@ -51,7 +56,12 @@ interface Attempt {
 const keyFor = (provider: Provider) =>
   provider === "gemini" ? process.env.GEMINI_API_KEY : process.env.GROQ_API_KEY;
 
-async function callGemini(model: string, prompt: string, opts: LlmOptions): Promise<Attempt> {
+async function callGemini(
+  model: string,
+  prompt: string,
+  opts: LlmOptions,
+  signal: AbortSignal
+): Promise<Attempt> {
   const res = await fetch(
     `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`,
     {
@@ -68,6 +78,7 @@ async function callGemini(model: string, prompt: string, opts: LlmOptions): Prom
           ...(opts.responseSchema ? { responseSchema: opts.responseSchema } : {}),
         },
       }),
+      signal,
     }
   );
   if (!res.ok) {
@@ -85,7 +96,12 @@ async function callGemini(model: string, prompt: string, opts: LlmOptions): Prom
 // optional fields (a belief's derivedFrom, a grade's culpritBeliefId). So the
 // shape comes from the "Return JSON: {...}" line every prompt already ends with,
 // and a reply that ignores it is caught by the parse below and drops a rung.
-async function callGroq(model: string, prompt: string, opts: LlmOptions): Promise<Attempt> {
+async function callGroq(
+  model: string,
+  prompt: string,
+  opts: LlmOptions,
+  signal: AbortSignal
+): Promise<Attempt> {
   const res = await fetch("https://api.groq.com/openai/v1/chat/completions", {
     method: "POST",
     headers: {
@@ -98,6 +114,7 @@ async function callGroq(model: string, prompt: string, opts: LlmOptions): Promis
       response_format: { type: "json_object" },
       messages: [{ role: "user", content: prompt }],
     }),
+    signal,
   });
   if (!res.ok) {
     return { ok: false, status: res.status, detail: (await res.text()).slice(0, 200) };
@@ -109,6 +126,16 @@ async function callGroq(model: string, prompt: string, opts: LlmOptions): Promis
     : { ok: false, detail: `empty (${data?.choices?.[0]?.finish_reason ?? "no choices"})` };
 }
 
+// A judge hammering the app mid-hackathon is the whole point of shipping it, so
+// a single stuck upstream call must never be allowed to sit there until the
+// platform kills the whole function and hands back an HTML error page instead
+// of JSON (that page is what the frontend's res.json() then chokes on). Two
+// bounds, not one: a per-attempt timeout so a hang can't eat the budget on its
+// own, and a wall-clock budget on the whole ladder so a bad run always fails
+// fast and clean well inside the route's own maxDuration, rather than racing it.
+const ATTEMPT_TIMEOUT_MS = 20_000;
+const LADDER_BUDGET_MS = 45_000;
+
 export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Promise<T> {
   const rungs = (opts.rungs ?? TIERS[opts.tier ?? "smart"]).filter((r) => keyFor(r.provider));
   if (!rungs.length) throw new Error("no LLM provider is configured");
@@ -117,24 +144,36 @@ export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Pr
   // (429) drops immediately instead of waiting out the quota window. A 4xx is our
   // own request being wrong for that provider, so it skips the provider's
   // remaining rungs rather than repeating the same mistake on a sibling model.
-  const maxAttempts = 3;
+  const maxAttempts = 2;
+  const ladderBudgetMs = opts.ladderBudgetMs ?? LADDER_BUDGET_MS;
   let lastError = "";
   const dead = new Set<Provider>();
+  const startedAt = Date.now();
 
   for (const { provider, model } of rungs) {
     if (dead.has(provider)) continue;
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      const remaining = ladderBudgetMs - (Date.now() - startedAt);
+      if (remaining <= 0) {
+        lastError = lastError || "ran out of time before any rung answered";
+        break;
+      }
       const call = provider === "gemini" ? callGemini : callGroq;
+      const timeoutMs = Math.min(ATTEMPT_TIMEOUT_MS, remaining);
       // fetch throws rather than returning a response when the connection
-      // itself fails (DNS, reset, headers timeout). Unhandled, that escapes the
-      // ladder entirely and a flaky minute of network looks exactly like an
-      // outage. It is a transport failure, so treat it as a 5xx: retry, then
-      // step down.
+      // itself fails (DNS, reset, headers timeout, or our own abort). Unhandled,
+      // that escapes the ladder entirely and a flaky minute of network looks
+      // exactly like an outage. It is a transport failure, so treat it as a
+      // 5xx: retry, then step down.
       let res: Attempt;
       try {
-        res = await call(model, prompt, opts);
+        res = await call(model, prompt, opts, AbortSignal.timeout(timeoutMs));
       } catch (e) {
-        res = { ok: false, detail: e instanceof Error ? e.message : "fetch failed" };
+        const timedOut = e instanceof Error && e.name === "TimeoutError";
+        res = {
+          ok: false,
+          detail: timedOut ? `no response in ${timeoutMs}ms` : e instanceof Error ? e.message : "fetch failed",
+        };
       }
 
       if (res.ok) {
@@ -155,8 +194,10 @@ export async function generateJson<T>(prompt: string, opts: LlmOptions = {}): Pr
       }
 
       if (attempt === maxAttempts) break;
-      await new Promise((r) => setTimeout(r, 1500 * 2 ** (attempt - 1)));
+      const backoff = Math.min(800 * 2 ** (attempt - 1), ladderBudgetMs - (Date.now() - startedAt));
+      if (backoff > 0) await new Promise((r) => setTimeout(r, backoff));
     }
+    if (Date.now() - startedAt >= ladderBudgetMs) break;
   }
 
   console.error("llm: every rung failed:", lastError);

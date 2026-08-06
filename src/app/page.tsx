@@ -102,6 +102,56 @@ async function sealOf(questions: ExamQuestion[], syllabus: SyllabusNode[]): Prom
     .join("");
 }
 
+// A judge hammering this mid-hackathon is the whole point of shipping it, so
+// every route call goes through here rather than a bare fetch().json(). Two
+// things it guards against: the request never coming back at all (network
+// stall, dead deploy - bounded by the timeout below instead of hanging
+// forever), and it coming back but not as JSON (a platform error page from a
+// killed function starts with "<" or "An error..."; parsing that as JSON is
+// what used to crash the caller instead of showing a clean message).
+const API_TIMEOUT_MS = 55_000;
+
+async function callApi<T = Record<string, unknown>>(
+  path: string,
+  payload: unknown
+): Promise<{ ok: boolean; status: number; body: T & { error?: string } }> {
+  let res: Response;
+  try {
+    res = await fetch(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(API_TIMEOUT_MS),
+    });
+  } catch (e) {
+    const timedOut = e instanceof Error && e.name === "TimeoutError";
+    return {
+      ok: false,
+      status: 0,
+      body: {
+        error: timedOut
+          ? "That took too long and never came back. Try again — it usually lands the second time."
+          : "Could not reach the server. Check your connection and try again.",
+      } as T & { error?: string },
+    };
+  }
+  const text = await res.text();
+  let body = {} as T & { error?: string };
+  if (text) {
+    try {
+      body = JSON.parse(text);
+    } catch {
+      body = {
+        error:
+          res.status >= 500 || !res.status
+            ? "The server gave up before it finished. Try again in a moment."
+            : `Something broke server-side (status ${res.status}). Try again in a moment.`,
+      } as T & { error?: string };
+    }
+  }
+  return { ok: res.ok, status: res.status, body };
+}
+
 const SUGGESTED = ["photosynthesis", "binary search", "the French Revolution", "supply and demand"];
 
 function scoreOf(grades: GradedAnswer[]): number {
@@ -294,16 +344,11 @@ export default function Home() {
     // taught, and the lesson screen never claims the seal.
     paperTopicRef.current = subject;
     setPaperPending(true);
-    fetch("/api/paper", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ topic: subject }),
-    })
-      .then((res) => res.json().then((body) => ({ ok: res.ok, body })))
+    callApi<{ questions: ExamQuestion[]; syllabus: SyllabusNode[] }>("/api/paper", { topic: subject })
       .then(({ ok, body }) => {
         if (ok && body.questions?.length && paperTopicRef.current === subject) {
-          const questions = body.questions as ExamQuestion[];
-          const map = (body.syllabus ?? []) as SyllabusNode[];
+          const questions = body.questions;
+          const map = body.syllabus ?? [];
           setPaper(questions);
           writeSyllabus(map);
           setSealSeen(true);
@@ -346,33 +391,24 @@ export default function Home() {
     setPipThinking(true);
     setWritingNotes((n) => n + 1);
 
-    const replyPromise = fetch("/api/reply", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        topic,
-        ledger: ledgerRef.current,
-        transcript: nextTranscript,
-        message,
-      }),
+    const replyPromise = callApi<PupilReply>("/api/reply", {
+      topic,
+      ledger: ledgerRef.current,
+      transcript: nextTranscript,
+      message,
     });
 
     extractions.current = extractions.current.then(async () => {
       try {
-        const res = await fetch("/api/extract", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            topic,
-            ledger: ledgerRef.current,
-            syllabus: syllabusRef.current,
-            message,
-            turn,
-          }),
+        const { ok, body } = await callApi<{ ledger: Belief[] }>("/api/extract", {
+          topic,
+          ledger: ledgerRef.current,
+          syllabus: syllabusRef.current,
+          message,
+          turn,
         });
-        const body = await res.json();
-        if (!res.ok) throw new Error(body?.error ?? `notebook failed (${res.status})`);
-        writeLedger(body.ledger as Belief[]);
+        if (!ok) throw new Error(body.error ?? "the notebook call failed");
+        writeLedger(body.ledger);
       } catch (e) {
         toast.error("Pip could not write that down.", {
           description: e instanceof Error ? e.message : "The notebook call failed.",
@@ -383,11 +419,9 @@ export default function Home() {
     });
 
     try {
-      const replyRes = await replyPromise;
-      const body = await replyRes.json();
-      if (!replyRes.ok) throw new Error(body?.error ?? `request failed (${replyRes.status})`);
-      const reply = body as PupilReply;
-      setTranscript((t) => [...t, { role: "pupil", text: reply.reply }]);
+      const { ok, body } = await replyPromise;
+      if (!ok) throw new Error(body.error ?? "request failed");
+      setTranscript((t) => [...t, { role: "pupil", text: body.reply }]);
     } catch (e) {
       toast.error("Pip lost the thread.", {
         description: e instanceof Error ? e.message : "Say the next one.",
@@ -402,17 +436,15 @@ export default function Home() {
     if (!checkinConcept.trim() || checkinBusy) return;
     setCheckinBusy(true);
     try {
-      const res = await fetch("/api/checkin", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, ledger: ledgerRef.current, concept: checkinConcept }),
+      const { ok, body } = await callApi<PupilReply>("/api/checkin", {
+        topic,
+        ledger: ledgerRef.current,
+        concept: checkinConcept,
       });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body?.error ?? `request failed (${res.status})`);
-      const reply = body as PupilReply;
+      if (!ok) throw new Error(body.error ?? "request failed");
       setTranscript((t) => [
         ...t,
-        { role: "pupil", text: reply.reply, checkin: true, kind: "checkin" },
+        { role: "pupil", text: body.reply, checkin: true, kind: "checkin" },
       ]);
     } catch (e) {
       toast.error("Pip could not explain that back.", {
@@ -429,15 +461,27 @@ export default function Home() {
     setPhase("exam");
     setExamStage("writing");
     setExamScript([]);
+    let landed = false;
     try {
       const res = await fetch("/api/exam", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ topic, ledger, paper }),
+        // Three model calls run in sequence server-side before this resolves,
+        // so the client's own ceiling has to sit above their combined budget,
+        // not the usual per-call timeout.
+        signal: AbortSignal.timeout(90_000),
       });
       if (!res.ok) {
-        const { error } = await res.json();
-        throw new Error(error ?? `request failed (${res.status})`);
+        const text = await res.text();
+        let message = `request failed (${res.status})`;
+        try {
+          message = JSON.parse(text)?.error ?? message;
+        } catch {
+          // A killed function hands back its own error page, not JSON. The
+          // generic message above is what the toast shows in that case.
+        }
+        throw new Error(message);
       }
       const reader = res.body!.getReader();
       const decoder = new TextDecoder();
@@ -450,24 +494,44 @@ export default function Home() {
         buffer = lines.pop() ?? "";
         for (const line of lines) {
           if (!line.trim()) continue;
-          const msg = JSON.parse(line);
+          let msg: { kind: string; [k: string]: unknown };
+          try {
+            msg = JSON.parse(line);
+          } catch {
+            continue; // a torn or partial line; the next chunk completes it
+          }
           if (msg.kind === "stage") {
-            setExamStage(msg.stage);
+            setExamStage(msg.stage as string);
             if (msg.questions) setPaper(msg.questions as ExamQuestion[]);
             // Pip's script arrives before the grader has read it, so the wait
             // is spent reading what your own lesson made him write.
             if (msg.answers) setExamScript(msg.answers as ExamAnswer[]);
           } else if (msg.kind === "done") {
-            setResult({ questions: msg.questions, answers: msg.answers, grades: msg.grades });
-            setPaper(msg.questions);
+            setResult({
+              questions: msg.questions as ExamQuestion[],
+              answers: msg.answers as ExamAnswer[],
+              grades: msg.grades as GradedAnswer[],
+            });
+            setPaper(msg.questions as ExamQuestion[]);
             setSelected(null);
             setPhase("report");
-          } else if (msg.kind === "error") throw new Error(msg.message);
+            landed = true;
+          } else if (msg.kind === "error") throw new Error(msg.message as string);
         }
       }
+      // The stream closed without a "done" or "error" line - the function was
+      // killed mid-flight rather than failing cleanly. Same user-facing result
+      // either way: say so instead of leaving the exam hall frozen forever.
+      if (!landed) throw new Error("The exam hall lost the connection before it finished.");
     } catch (e) {
+      if (landed) return;
+      const timedOut = e instanceof Error && e.name === "TimeoutError";
       toast.error("The exam was abandoned.", {
-        description: e instanceof Error ? e.message : "The exam hall caught fire.",
+        description: timedOut
+          ? "It ran too long and gave up. Try sending Pip in again."
+          : e instanceof Error
+            ? e.message
+            : "The exam hall caught fire.",
       });
       setPhase("lesson");
     }
@@ -521,14 +585,12 @@ export default function Home() {
     if (!text || disputeBusy) return;
     setDisputeBusy(true);
     try {
-      const res = await fetch("/api/dispute", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ topic, belief, objection: text }),
+      const { ok, body: out } = await callApi<Dispute>("/api/dispute", {
+        topic,
+        belief,
+        objection: text,
       });
-      const body = await res.json();
-      if (!res.ok) throw new Error(body?.error ?? `request failed (${res.status})`);
-      const out = body as Dispute;
+      if (!ok) throw new Error(out.error ?? "request failed");
       setTranscript((t) => [
         ...t,
         { role: "pupil", text: out.reply, checkin: true, kind: "dispute" },

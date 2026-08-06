@@ -551,10 +551,15 @@ Short-answer questions, each answerable in 1-3 sentences. For each, state what
 a correct answer must contain in "lookingFor".
 ${probeBlock}
 Return JSON: {"questions": [{"q", "lookingFor"}]}`;
+  // This is one of three sequential calls the exam route makes in a single
+  // invocation, so it gets a tighter budget than a route that only makes one -
+  // otherwise three full-length ladders in a row can outrun the route's own
+  // maxDuration even before a real provider outage is in play.
   const { questions } = await generateJson<{ questions: ExamQuestion[] }>(prompt, {
     temperature: 0.7,
     tier: "smart",
     responseSchema: EXAM_SCHEMA,
+    ladderBudgetMs: 18_000,
   });
   return (questions ?? []).slice(0, count);
 }
@@ -726,6 +731,7 @@ Return JSON: {"answers": [{"answer", "usedBeliefIds", "confessed"}]} in question
     tier: "smart",
     responseSchema: SIT_SCHEMA,
     rungs,
+    ladderBudgetMs: 18_000,
   });
   return answers ?? [];
 }
@@ -802,6 +808,7 @@ Return JSON: {"grades": [{"verdict", "explanation", "culpritBeliefId"}]} in orde
     tier: "smart",
     responseSchema: GRADE_SCHEMA,
     rungs,
+    ladderBudgetMs: 18_000,
   });
   // The one rule the grader is not allowed to break. Asked politely, Gemini marks
   // a confessed gap blank and Groq hands it full marks for a guess it made from
