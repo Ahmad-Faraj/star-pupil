@@ -3,7 +3,21 @@
 // in-character chat. Each tier is a ladder of rungs that steps down when a model
 // is throttled, and the bottom rungs are a different provider, so Gemini running
 // out of free quota mid-demo degrades to a slower answer instead of an error.
-// gemini-flash-latest and 3.5-flash are unusable here: ~20 free requests/day.
+//
+// Ladder order is free-tier quota, richest first, NOT quality first - this
+// project runs on $0, so availability beats picking the single best model on
+// the first try. Measured on Google AI Studio's own dashboard the day this was
+// tuned: gemini-3-flash-preview caps at 20 requests/day and 5/minute and was
+// already over both from ordinary testing traffic alone - it is the best
+// individual model here but the worst possible thing to put first, since on a
+// free key it is nearly always the one rung that is already spent. It is kept
+// at the bottom of both ladders: a real answer if it happens to have quota
+// left, never the thing every request waits on first. gemini-3.1-flash-lite
+// (500/day, 15/min) leads instead, then Groq's two "smart" models
+// (openai/gpt-oss-120b and llama-3.3-70b-versatile, 1,000/day and 30/min EACH,
+// separate buckets) as real fallback depth rather than a formality.
+// gemini-flash-latest and 3.5-flash are unusable here for the same reason
+// gemini-3-flash-preview now sits last: ~20 free requests/day.
 
 export type Provider = "gemini" | "groq";
 
@@ -12,20 +26,20 @@ export interface Rung {
   model: string;
 }
 
-// Groq is the fallback rather than the primary because only Gemini enforces the
-// response schema. Groq is held to JSON validity and the shape stated in each
-// prompt, which is looser, so it answers only when Gemini cannot.
 const TIERS: Record<"smart" | "fast", Rung[]> = {
   smart: [
-    { provider: "gemini", model: process.env.GEMINI_MODEL ?? "gemini-3-flash-preview" },
     { provider: "gemini", model: "gemini-3.1-flash-lite" },
     { provider: "groq", model: "openai/gpt-oss-120b" },
     { provider: "groq", model: "llama-3.3-70b-versatile" },
+    { provider: "gemini", model: process.env.GEMINI_MODEL ?? "gemini-3-flash-preview" },
   ],
   fast: [
     { provider: "gemini", model: "gemini-3.1-flash-lite" },
-    { provider: "gemini", model: "gemini-3-flash-preview" },
+    // llama-3.1-8b-instant's free quota is 14,400/day - by far the deepest
+    // well available here, and Pip's in-character chat is the tier that can
+    // most afford a slightly plainer model when it's the one actually online.
     { provider: "groq", model: "llama-3.1-8b-instant" },
+    { provider: "gemini", model: "gemini-3-flash-preview" },
   ],
 };
 
